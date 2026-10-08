@@ -1,0 +1,243 @@
+// The invitee's page, and the two pieces an app's people page uses: the form that sends one, and the list of the ones
+// still waiting. Every colour, face and size is a theme token.
+//
+// ⚑ NO POLICY IS NAMED IN HERE. Who may invite is the app's `MayInvite`, which the kit cannot read in its own code (it
+//   is the app's definition, bound when the app compiles) — so the app gates the PAGE these sit on, and passes
+//   `canChange:` from its own policy. The rows and the functions are gated by the kit's rules either way: a control
+//   offered to somebody who may not use it is refused, with the reason.
+
+namespace Osysharp.Invitations;
+
+using Osysharp.Identity;
+using Osysharp.Accounts;
+using Osysharp.Organizations;
+using Osysharp.Ui;
+
+/// An invitation as a page shows it.
+public class InvitationView {
+  public Guid Id;
+  public string Email = "";
+  /// What it brings you into — the organisation's name, or the app's.
+  public string Into = "";
+  public string From = "";
+  /// The role it grants, by the name the app gives it — "" for none.
+  public string RoleName = "";
+  public DateTime? ExpiresAt;
+  public int Sends = 0;
+}
+
+InvitationView ViewOf(Invitation i) {
+  return new InvitationView {
+    Id = i.Id, Email = i.Email, Into = InvitedInto(i), From = i.InvitedBy.DisplayName,
+    RoleName = i.Role == null ? "" : RoleLabel(i.Role.Value), ExpiresAt = i.ExpiresAt, Sends = i.Sends,
+  };
+}
+
+/// The waiting invitations the signed-in person may accept — to their own, PROVEN, address — as a page shows them.
+[AllowAnonymous]
+public List<InvitationView> MyInvitationViews() {
+  List<InvitationView> all = [];
+  foreach (var i in MyInvitations()) { all.Add(ViewOf(i)); }
+  return all;
+}
+
+/// Accept the invitation `id` as the signed-in person (`AcceptInvitation`). Answers what it brought them into.
+[AllowAnonymous]
+public string AcceptInvitationById(Guid id) {
+  var i = Invitation.Single(x => x.Id == id);
+  var into = InvitedInto(i);
+  AcceptInvitation(i);
+  return into;
+}
+
+/// The invitations still waiting — app-wide, or into `into` — as a page shows them.
+[SuppressWarning("cost-unbounded-read")]   // only the WAITING ones, and each expires — the invitations out now, not every one sent
+public List<InvitationView> WaitingInvitations(Organization? into = null) {
+  List<InvitationView> all = [];
+  foreach (var i in Invitation.Where(x => x.Status == InvitationStatus.Pending && x.Organization == into)
+                              .Include(x => x.InvitedBy).OrderByDescending(x => x.SentAt).ToList()) {
+    all.Add(ViewOf(i));
+  }
+  return all;
+}
+
+public void RevokeInvitationById(Guid id) { RevokeInvitation(Invitation.Single(x => x.Id == id)); }
+public void ResendInvitationById(Guid id) { ResendInvitation(Invitation.Single(x => x.Id == id)); }
+
+/// What the invitee sees at the mailed link: signed out, a choice — make an account for the invited address (with the
+/// link), or sign in to the one they have; signed in, the invitations waiting for their proven address, to accept.
+[Composable]
+public component InvitationAnswer(string token) {
+  live var me = Session.CurrentUser;
+  bool newcomer = true;
+  string email = "";
+  string name = "";
+  string password = "";
+  string problem = "";
+  bool joined = false;
+  List<InvitationView> waiting = [];
+  string accepted = "";
+
+  on mount { if (Session.CurrentUser != null) { waiting = MyInvitationViews(); } }
+
+  action Join() {
+    problem = JoinByInvitation(token, email, name, password);
+    if (problem == "") { joined = true; }
+  }
+  action Accept(Guid id) {
+    problem = "";
+    try { accepted = AcceptInvitationById(id); waiting = MyInvitationViews(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action ShowNew() { newcomer = true; problem = ""; }
+  action ShowExisting() { newcomer = false; problem = ""; }
+
+  render {
+    Stack(gap: 3) {
+      if (me != null) {
+        if (accepted != "") { Alert($"Welcome to {accepted}.", tone: Tone.Success); }
+        if (me.EmailVerifiedAt == null) {
+          Alert($"Confirm your address ({me.Email}) first — an invitation is accepted only by the address it was sent to, once it is proven.",
+                tone: Tone.Default);
+          TextLink("Go to your account", to: "/account");
+        } else if (waiting.Count == 0) {
+          if (accepted == "") {
+            EmptyState("Nothing waiting for you", body: $"There is no open invitation for {me.Email}. It may have been accepted, withdrawn, or sent to another address.");
+          }
+        } else {
+          Stack(gap: 2, role: UiRole.List, label: "Your invitations") {
+            foreach (var i in waiting) {
+              Row(gap: 3, align: Align.Center, role: UiRole.ListItem, label: i.Into, py: 2) {
+                Stack(gap: 0, grow: 1, minW: "0") {
+                  Text(i.Into, fontWeight: FontWeight.Semibold);
+                  Text($"From {i.From}" + (i.RoleName != "" ? $" · as {i.RoleName}" : ""), color: Colors.TextMuted, fontSize: FontSize.Caption);
+                }
+                Button("Accept", onPress: () => Accept(i.Id), tone: Tone.Primary);
+              }
+            }
+          }
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      } else if (joined) {
+        Alert("Your account is ready. Sign in — and you are in.", tone: Tone.Success);
+        SignInForm(email: email, password: password);
+      } else {
+        Row(gap: 2, role: UiRole.Group, label: "How to answer") {
+          Button("I'm new here", onPress: ShowNew, tone: newcomer ? Tone.Primary : Tone.Ghost);
+          Button("I have an account", onPress: ShowExisting, tone: newcomer ? Tone.Ghost : Tone.Primary);
+        }
+        if (newcomer) {
+          Text("Make your account — for the address this invitation was sent to.", color: Colors.TextMuted);
+          Field("Your name", value: name, placeholder: "How colleagues see you");
+          Field("Email", value: email, type: "email", placeholder: "The address the invitation came to");
+          Field("Password", value: password, type: "password", onEnter: Join, hint: "At least ten characters.");
+          if (problem != "") { Alert(problem, tone: Tone.Danger); }
+          Button("Join", onPress: Join, tone: Tone.Primary, size: Size.Lg);
+        } else {
+          Text("Sign in, and accept the invitation here.", color: Colors.TextMuted);
+          SignInForm(then: "/invite/" + token);
+        }
+      }
+    }
+  }
+}
+
+[Composable]
+public component InvitationScreen(string token) {
+  render { AccountsFrame("You are invited", sub: "Answer it with the address it was sent to.") { InvitationAnswer(token); } }
+}
+
+/// The page the mail links to — anybody may open it; the link (or a full sign-in) is what answers it.
+[Page("/invite/{token}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
+public component InvitationPage(string token) { render { InvitationScreen(token); } }
+
+/// Send an invitation — an address, one of the roles the app offers (`app.Roles`), and an optional line. With `into`, to
+/// that organisation, the role held there. `onSent` hears each one sent; `canSend` is the app's own answer to "may this
+/// person invite?" (`canSend: MayInvite`) — the send is refused by the kit's rules either way.
+[Composable]
+public component InviteForm(Organization? into = null, Action onSent = null, bool canSend = true) {
+  string email = "";
+  string note = "";
+  RoleOption? chosen = null;
+  string problem = "";
+  string sent = "";
+  List<RoleOption> roles = [];
+  on mount { roles = OfferedRoles(); }
+
+  action Choose(RoleOption c) { chosen = c; }
+  action Send() {
+    problem = "";
+    sent = "";
+    try {
+      Invite(email, role: chosen == null ? null : chosen.Role, organization: into, note: note);
+      sent = $"Invitation sent to {email.Trim().ToLower()}.";
+      email = "";
+      note = "";
+      if (onSent != null) { onSent(); }
+    }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+
+  render {
+    Stack(gap: 3) {
+      Field("Email", value: email, type: "email", placeholder: "name@company.com", onEnter: Send);
+      if (roles.Count > 0) {
+        Stack(gap: 1) {
+          Text("Role", fontSize: FontSize.Caption, fontWeight: FontWeight.Medium);
+          Row(gap: 2, wrap: Wrapping.Wrap, role: UiRole.Group, label: "Role") {
+            foreach (var c in roles) {
+              Button(c.Label, onPress: () => Choose(c), size: Size.Sm, tone: chosen != null && chosen.Label == c.Label ? Tone.Primary : Tone.Ghost);
+            }
+          }
+          if (chosen != null && chosen.Description != "") { Text(chosen.Description, fontSize: FontSize.Caption, color: Colors.TextMuted); }
+        }
+      }
+      Field("A note (optional)", value: note, placeholder: "Quoted in the invitation mail");
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      if (sent != "") { Alert(sent, tone: Tone.Success); }
+      Button("Send invitation", onPress: Send, tone: Tone.Primary, disabled: !canSend);
+    }
+  }
+}
+
+/// The invitations still waiting — app-wide, or into `into` — with when each lapses, and resend and revoke (offered when
+/// `canChange`, the app's own answer: `canChange: MayInvite`). Kept current as invitations are sent, answered or lapse.
+[Composable]
+public component InvitationList(Organization? into = null, bool canChange = true) {
+  live var waiting = Invitation.Where(i => i.Status == InvitationStatus.Pending && i.Organization == into)
+    .Include(i => i.InvitedBy).OrderByDescending(i => i.SentAt).ToList();
+  List<RoleOption> roles = [];
+  string problem = "";
+  on mount { roles = OfferedRoles(); }
+
+  /// A role's name for people, from the roles the app offers — "" for none.
+  string NameOf(Invitation i) {
+    if (i.Role == null) { return ""; }
+    foreach (var r in roles) { if (r.Role != null && r.Role.Value == i.Role.Value) { return r.Label; } }
+    return "";
+  }
+
+  action Again(Invitation i) { problem = ""; try { ResendInvitation(i); } catch (Exception ex) { problem = ex.Message; } }
+  action Withdraw(Invitation i) { problem = ""; try { RevokeInvitation(i); } catch (Exception ex) { problem = ex.Message; } }
+
+  render {
+    Stack(gap: 0, role: UiRole.List, label: "Waiting invitations") {
+      if (waiting.Count == 0) { Text("No invitations waiting.", color: Colors.TextMuted, py: 2); }
+      foreach (var i in waiting) {
+        Row(gap: 3, align: Align.Center, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: i.Email) {
+          Stack(gap: 0, grow: 1, minW: "0") {
+            Text(i.Email, fontWeight: FontWeight.Medium);
+            Text((NameOf(i) != "" ? NameOf(i) + " · " : "") + $"invited by {i.InvitedBy.DisplayName}"
+                 + (i.ExpiresAt != null ? $" · lapses {i.ExpiresAt.Value.ToString("d MMM")}" : ""),
+                 fontSize: FontSize.Caption, color: Colors.TextMuted);
+          }
+          if (canChange) {
+            Button("Resend", onPress: () => Again(i), size: Size.Sm, tone: Tone.Ghost);
+            Button("Revoke", onPress: () => Withdraw(i), size: Size.Sm, tone: Tone.Danger);
+          }
+        }
+      }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+    }
+  }
+}

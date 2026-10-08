@@ -1,0 +1,22 @@
+// Test helpers. The mailbox is stood in for by the outbox: a test reads the link an invitation mail carried as the
+// sign-in flow (`runas (AuthBootstrap) { … }`), the outbox's only reader here.
+using Osysharp.Mail;
+
+/// The token in the newest mail to `to` whose text carries an invitation link, or "".
+string InvitationTokenFor(string to) {
+  var mail = OutgoingMail.Where(m => m.To == to && m.Text != null && m.Text.Contains("/invite/"))
+    .OrderByDescending(m => m.CreatedAt).FirstOrDefault();
+  if (mail == null) { return ""; }
+  var text = mail.Text ?? "";
+  var at = text.IndexOf("/invite/") + "/invite/".Length;
+  var end = at;
+  while (end < text.Length && text.Substring(end, 1) != " " && text.Substring(end, 1) != "\n" && text.Substring(end, 1) != ")") {
+    end = end + 1;
+  }
+  return text.Substring(at, end - at);
+}
+
+/// How many invitation mails went to `to`.
+int InvitationMailsTo(string to) {
+  return OutgoingMail.Count(m => m.To == to && m.Text != null && m.Text.Contains("/invite/"));
+}

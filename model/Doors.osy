@@ -1,0 +1,177 @@
+// What an app calls: send, revoke and resend an invitation; and the two doors an invitee answers through.
+
+namespace Osysharp.Invitations;
+
+using Osysharp.Identity;
+using Osysharp.Accounts;
+using Osysharp.Organizations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+using Osysharp.EmailTemplates;
+
+/// How the app invites — `app.Invitations = new InvitationsSetup { … }`. Every member has a working default.
+[AppSetting("Invitations")]
+public class InvitationsSetup {
+  /// How long an invitation stays open from when it was last sent. An organisation's security policy may set it for
+  /// every app it runs.
+  [OrgPolicy(OrgPolicyMode.Lock)] public TimeSpan ValidFor = TimeSpan.FromDays(7);
+  /// When an invitee who has not answered is reminded, and how often after that (zero: once).
+  public TimeSpan RemindAfter = TimeSpan.FromDays(3);
+  public TimeSpan RemindEvery = TimeSpan.FromDays(2);
+  /// The mail it sends — derive and override to write your own.
+  public InvitationMails Mails = new InvitationMails();
+  /// What kind of account a newcomer's invitation makes — derive and override when the invitation says more than the
+  /// address does (`InvitationAccounts`).
+  public InvitationAccounts Accounts = new InvitationAccounts();
+}
+
+/// What kind of account a newcomer makes by accepting. By default the app's own sign-up kind (`AccountsSetup.Kinds`);
+/// an app whose invitation says more than the address does derives and overrides — somebody invited as an agent from a
+/// contractor's domain is still an agent:
+///
+///     public class DeskInvitations : InvitationAccounts {
+///       public override User New(Invitation invitation, string email, string name) {
+///         if (invitation.Role != null) { return new Agent { Email = email }; }
+///         return base.New(invitation, email, name);
+///       }
+///     }
+///
+/// `email` is the invited address (normalised); the kit then sets everything sign-in rests on.
+public class InvitationAccounts {
+  public virtual User New(Invitation invitation, string email, string name) {
+    return App.Setting<AccountsSetup>().Kinds.New(email, name);
+  }
+}
+
+/// Invite `email` — to hold `role` in the app, or (with `organization`) to join that organisation, holding `role` there.
+/// Mailed once it is saved; reminded, and lapsing, on `app.Invitations`' cadence. Pressing it twice is one invitation:
+/// an address already waiting on the same invitation gets no second mail (`ResendInvitation` is how to send again).
+/// Throws the sentence to show for something that is not an address, or a person who already holds what it would give.
+public Invitation Invite(string email, role? role = null, Organization? organization = null, string note = "") {
+  var address = NormalisedEmail(email);
+  if (!LooksLikeEmail(address)) { throw new ValidationException("That does not look like an email address."); }
+  var existing = Invitation.FirstOrDefault(i => i.Email == address && i.Status == InvitationStatus.Pending
+    && i.Organization == organization && i.Role == role);
+  if (existing != null) { return existing; }
+  var person = Principal.FirstOrDefault(p => p.Email == address);
+  if (person != null && AlreadyHolds(person, role, organization)) {
+    throw new ValidationException($"{address} already has that — there is nothing to invite them to.");
+  }
+  var setup = App.Setting<InvitationsSetup>();
+  var made = new Invitation {
+    Email = address, Role = role, Organization = organization, InvitedBy = Session.CurrentUser!,
+    Note = note.Trim() == "" ? null : note.Trim(),
+    ValidFor = setup.ValidFor, RemindAfter = setup.RemindAfter, RemindEvery = setup.RemindEvery,
+  };
+  UnitOfWork.Commit();
+  return made;
+}
+
+/// Does `person` already hold what an invitation with `role` (in `organization`) would give?
+bool AlreadyHolds(Principal person, role? role, Organization? organization) {
+  if (organization != null) {
+    var org = organization!;
+    if (!Membership.Any(m => m.Organization == org && m.Member == person && m.IsActive)) { return false; }
+    return role == null || HoldsIn(person, org, role.Value);
+  }
+  return role != null && RoleGrant.Any(g => g.Member == person && g.Role == role.Value);
+}
+
+/// Withdraw a waiting invitation: its link stops working and it can no longer be accepted. Needs the right to change
+/// it (`MayInvite`, or what the app grants) — the revoker is recorded as they do it.
+public void RevokeInvitation(Invitation invitation) {
+  if (invitation.Status != InvitationStatus.Pending) { throw new ValidationException("Only a waiting invitation can be revoked."); }
+  invitation.RevokedBy = Session.CurrentUser;
+  InvitationFlow.RaiseRevoke(invitation);
+  UnitOfWork.Commit();
+}
+
+/// Send a waiting invitation again: a new link (the old one stops working) and its time starts over.
+public void ResendInvitation(Invitation invitation) {
+  if (invitation.Status != InvitationStatus.Pending) { throw new ValidationException("Only a waiting invitation can be sent again — invite them afresh."); }
+  invitation.LastSentBy = Session.CurrentUser;
+  InvitationFlow.RaiseResend(invitation);
+  UnitOfWork.Commit();
+}
+
+/// The waiting invitations the signed-in person may accept — those to their own, PROVEN, address.
+[SuppressWarning("cost-unbounded-read")]   // one person's waiting invitations — each expires, so a handful at most
+public List<Invitation> MyInvitations() {
+  var me = Session.CurrentUser;
+  if (me == null || me.EmailVerifiedAt == null) { return []; }
+  return Invitation.Where(i => i.Email == me.Email && i.Status == InvitationStatus.Pending)
+    .Include(i => i.Organization).Include(i => i.InvitedBy).OrderByDescending(i => i.SentAt).ToList();
+}
+
+/// Accept an invitation as the signed-in person — the door for somebody who already has an account. They are signed in
+/// (so every step of their sign-in, the second factor included, is behind them), and the event admits only the invited
+/// address, proven.
+public void AcceptInvitation(Invitation invitation) {
+  InvitationFlow.RaiseAccept(invitation, null, null, null);
+  UnitOfWork.Commit();
+}
+
+/// The newcomer's door: make an account for the invited address from the mailed link's `token`, and accept. `email`
+/// must be the invited address — the link is for it and nobody else. Answers "" when the account is made (the page then
+/// signs in, as any sign-in: a code, or setting two-step sign-in up, when the app asks for it), or the sentence to show.
+///
+/// ⚑ ANONYMOUS ON PURPOSE: the person has no account yet. What admits them is the link — single-use, stored only as a
+///   hash, alive only while the invitation waits — and what it can do is make ONE account, for the invited address.
+[AllowAnonymous]
+public string JoinByInvitation(string token, string email, string name, string password) {
+  var address = NormalisedEmail(email);
+  if (!LooksLikeEmail(address)) { return "That does not look like an email address."; }
+  var problem = PasswordProblem(password, address);
+  if (problem != "") { return problem; }
+  var answer = new JoinAnswer { Email = address, Name = name.Trim(), PasswordHash = Security.HashPassword(password) };
+  try {
+    Workflow.Redeem(token.Trim(), JsonSerializer.Serialize(answer));
+    return "";
+  }
+  catch (ValidationException e) { return e.Message; }
+  catch (NotFoundException e) { return "This invitation link is not valid, or it has already been used."; }
+  catch (ConflictException e) { return "This invitation is no longer open — it may have been withdrawn, or it expired."; }
+}
+
+/// The token in a callback address — what the mailed link carries.
+string TokenOf(string callbackUrl) { return callbackUrl.Substring(callbackUrl.LastIndexOf("/") + 1); }
+
+/// The address the invitee opens — the kit's page, holding the link's token.
+public string InvitationLink(string callbackUrl) { return AccountsLink("/invite/" + TokenOf(callbackUrl)); }
+
+/// Mail `invitation` with the link `callbackUrl` answers — the first time, after a resend, or as a reminder.
+void MailInvitation(Invitation invitation, string callbackUrl, bool reminder) {
+  var mails = App.Setting<InvitationsSetup>().Mails;
+  var link = InvitationLink(callbackUrl);
+  var mail = reminder ? mails.Reminder(invitation, link) : mails.Invitation(invitation, link);
+  SendRendered(invitation.Email, mail, $"invitation-{invitation.Id}-{invitation.Sends}-{invitation.Reminders}");
+}
+
+/// What the invitation brings, in words — "Acme", "the team", for the mail and the page.
+public string InvitedInto(Invitation invitation) {
+  if (invitation.Organization != null) { return invitation.Organization!.Name; }
+  return AccountsAppName();
+}
+
+/// The mail an invitation sends, one method per kind. Derive, override, and name it in `app.Invitations`
+/// (`Mails = new MyMails()`) to write your own.
+public class InvitationMails {
+  /// The invitation, with the link that answers it.
+  public virtual RenderedEmail Invitation(Invitation invitation, string link) { return InvitationMail(invitation, link, false); }
+  /// A reminder to an invitee who has not answered yet.
+  public virtual RenderedEmail Reminder(Invitation invitation, string link) { return InvitationMail(invitation, link, true); }
+}
+
+[Email]
+public component InvitationMail(Invitation invitation, string link, bool reminder) {
+  subject => reminder ? $"Reminder: you are invited to {InvitedInto(invitation)}" : $"You are invited to {InvitedInto(invitation)}";
+  render {
+    EmailLayout(AccountsAppName(), preview: $"{invitation.InvitedBy.DisplayName} invited you to {InvitedInto(invitation)}.") {
+      EmailHeading(reminder ? "Your invitation is still waiting" : $"Join {InvitedInto(invitation)}");
+      EmailText($"{invitation.InvitedBy.DisplayName} invited {invitation.Email} to join {InvitedInto(invitation)}.");
+      if (invitation.Note != null) { EmailText($"“{invitation.Note}”"); }
+      EmailButton("Accept the invitation", link);
+      EmailNote("The link works once, and only for this address. If you already have an account, sign in and accept it there. If you did not expect this, ignore it — nothing happens until you answer.");
+    }
+  }
+}

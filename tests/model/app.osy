@@ -1,0 +1,39 @@
+// Everything this app writes about inviting: its roles, who may invite, how its roles read, and what a customer
+// company's own admin may do.
+using Osysharp.Identity;
+using Osysharp.Accounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+
+[Role] enum AppRole { Authenticator, Member, Agent, Admin, CustomerAdmin }
+
+policy IsAdmin => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Admin);
+policy MayInvite => IsAdmin;
+policy ManagesOrganizations => IsAdmin;
+
+app.Accounts = new AccountsSetup {
+  AppName = "Invite Desk", SignupOpen = false, SecondFactor = new AdminsUseCodes(),
+};
+
+app.Roles = new RolesSetup { Offered = [
+  new RoleChoice { Role = AppRole.Agent, Label = "Agent", Description = "Works the desk." },
+  new RoleChoice { Role = AppRole.Admin, Label = "Admin", Description = "Runs the desk." },
+  new RoleChoice { Role = AppRole.CustomerAdmin, Label = "Company admin", Description = "Looks after their company's people." },
+] };
+
+/// Admins must use two-step sign-in.
+public class AdminsUseCodes : SecondFactorPolicy {
+  public override bool Required(User account) { return RoleGrant.Any(g => g.Member == account && g.Role == AppRole.Admin); }
+}
+
+/// A customer company — its own admin invites its people into it, and nowhere else.
+entity Company : Organization {
+  security {
+    allow read, create, update when IsAdmin;
+    allow read when IsOrganizationMember where IsMemberOf(this);
+  }
+}
+
+partial entity Invitation {
+  security { allow read, create, update when IsAuthenticated where Organization != null && HoldsRoleIn(Organization, AppRole.CustomerAdmin); }
+}

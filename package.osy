@@ -1,0 +1,29 @@
+// Osysharp.Invitations — bring a person in by their address, with what they will be fixed before they say yes.
+//
+// One shape: an `Invitation` names an ADDRESS, the role the person will hold (the app's own `[Role]`) and, optionally,
+// the organisation they will hold it in. It is a durable run (Osysharp.Workflow): mailed once the invitation is saved,
+// reminded on a cadence, lapsing when its time is up, revocable and resendable until it is answered.
+//
+// ⚑ THE INVITATION IS FOR AN ADDRESS, AND ONLY THAT ADDRESS ANSWERS IT. Two doors, one rule:
+//   - somebody NEW opens the mailed link (single-use, stored only as a hash) and makes their account — for the invited
+//     address, and no other, already proven by the mail they opened;
+//   - somebody who HAS an account signs in — every step of it, the second factor included — and accepts in the app,
+//     where only an account whose address is the invited one, and PROVEN, may.
+//   So nobody accepts for an account by holding its mailbox alone, and nobody accepts as the address by having typed it.
+//
+// ⚑ THE APP SAYS WHO MAY INVITE:   policy MayInvite => IsAdmin;
+//   …and, if it likes, more (an organisation's own admin inviting into it) as an ordinary grant on `Invitation`.
+package Osysharp.Invitations {
+  version     "0.2.0";
+  minPlatform "0.9.0";
+  summary     "invite a person by address with their role (and organisation) fixed when it is sent — mailed, reminded, expiring, revocable and resendable as a durable run; answered only by the invited address: a newcomer through a single-use mailed link, an existing account only once fully signed in (its second step included) and with that address proven.";
+  model "model/**/*.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Accounts@0;
+  use Osysharp.Organizations@0;
+  use Osysharp.Mail@0;
+  use Osysharp.EmailTemplates@0;
+  use Osysharp.Ui;
+  use Osysharp.Workflow;
+  tests "tests";
+}

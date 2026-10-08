@@ -1,0 +1,155 @@
+// Answering an invitation — only by the address it was sent to: a newcomer through the mailed link, an existing account
+// only once it is signed in, with that address proven.
+// SECURITY-INVARIANT(invitations-answered-only-by-the-invited-address).
+
+using Osysharp.Identity;
+using Osysharp.Accounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[TestFixture]
+void Team() {
+  var sam = new User { Email = "sam@desk.test", DisplayName = "Sam", PasswordHash = Security.HashPassword("correct-horse-1"),
+                       EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = sam, Role = AppRole.Admin };
+  // Ada has an account with a proven address; Tom's address was never proven; Lin is somebody else entirely.
+  new User { Email = "ada@desk.test", DisplayName = "Ada", PasswordHash = Security.HashPassword("correct-horse-2"),
+             EmailVerifiedAt = DateTime.UtcNow };
+  new User { Email = "tom@desk.test", DisplayName = "Tom", PasswordHash = Security.HashPassword("correct-horse-3") };
+  new User { Email = "lin@desk.test", DisplayName = "Lin", PasswordHash = Security.HashPassword("correct-horse-4"),
+             EmailVerifiedAt = DateTime.UtcNow };
+  new Company { Name = "Acme" };
+}
+
+principal Sam => User.Single(u => u.Email == "sam@desk.test");
+principal Ada => User.Single(u => u.Email == "ada@desk.test");
+principal Tom => User.Single(u => u.Email == "tom@desk.test");
+principal Lin => User.Single(u => u.Email == "lin@desk.test");
+principal Nina => User.Single(u => u.Email == "nina@desk.test");
+
+/// Sam invites `email` with `r`, and the mail goes out. Answers the link's token.
+string Invited(string email, AppRole r) {
+  Invitation? sent = null;
+  runas (Sam) { sent = Invite(email, r); }
+  Workflow.Settle(sent!);
+  string token = "";
+  runas (AuthBootstrap) { token = InvitationTokenFor(email); }
+  return token;
+}
+
+[Test(Team)]
+void a_newcomer_makes_an_account_for_the_invited_address_through_the_link_and_holds_the_role() {
+  var token = Invited("nina@desk.test", AppRole.Agent);
+  Assert.Equal("", JoinByInvitation(token, "Nina@Desk.test", "Nina Alvarez", "a-long-password-1"));
+  string ticket = "";
+  runas (AuthBootstrap) { ticket = SignIn("nina@desk.test", "a-long-password-1").Ticket; }
+  Assert.NotEqual("", ticket);
+  runas (Nina) {
+    var me = User.Single(u => u.Email == "nina@desk.test");
+    Assert.Equal("Nina Alvarez", me.DisplayName);
+    Assert.NotNull(me.EmailVerifiedAt);
+    Assert.True(RoleGrant.Any(g => g.Member == me && g.Role == AppRole.Agent));
+  }
+  runas (Sam) { Assert.Equal(InvitationStatus.Accepted, Invitation.Single(i => i.Email == "nina@desk.test").Status); }
+}
+
+[Test(Team)]
+void the_link_makes_no_account_for_any_other_address() {
+  var token = Invited("nina@desk.test", AppRole.Agent);
+  Assert.NotEqual("", JoinByInvitation(token, "mallory@desk.test", "Mallory", "a-long-password-1"));
+  runas (Sam) {
+    Assert.False(User.Any(u => u.Email == "mallory@desk.test"));
+    Assert.Equal(InvitationStatus.Pending, Invitation.Single(i => i.Email == "nina@desk.test").Status);
+  }
+}
+
+[Test(Team)]
+void the_link_works_once() {
+  var token = Invited("nina@desk.test", AppRole.Agent);
+  Assert.Equal("", JoinByInvitation(token, "nina@desk.test", "Nina", "a-long-password-1"));
+  Assert.NotEqual("", JoinByInvitation(token, "nina@desk.test", "Nina again", "a-long-password-2"));
+}
+
+[Test(Team)]
+void holding_the_mailbox_never_accepts_for_an_account_that_exists() {
+  // Ada has an account. The link — what whoever reads her mail holds — does not accept for it: she signs in.
+  var token = Invited("ada@desk.test", AppRole.Agent);
+  var said = JoinByInvitation(token, "ada@desk.test", "Ada", "a-long-password-9");
+  Assert.Contains("already has an account", said);
+  runas (Ada) { Assert.False(RoleGrant.Any(g => g.Member == Ada && g.Role == AppRole.Agent)); }
+  runas (AuthBootstrap) {
+    // …and her password is the one she had.
+    Assert.NotEqual("", SignIn("ada@desk.test", "correct-horse-2").Ticket);
+  }
+}
+
+[Test(Team)]
+void an_existing_account_accepts_signed_in_with_its_address_proven() {
+  Invited("ada@desk.test", AppRole.Agent);
+  runas (Ada) {
+    var mine = MyInvitations();
+    Assert.Equal(1, mine.Count);
+    AcceptInvitation(mine[0]);
+  }
+  runas (Ada) { Assert.True(RoleGrant.Any(g => g.Member == Ada && g.Role == AppRole.Agent)); }
+  runas (Sam) {
+    var inv = Invitation.Single(i => i.Email == "ada@desk.test");
+    Assert.Equal(InvitationStatus.Accepted, inv.Status);
+    Assert.Equal("ada@desk.test", inv.AcceptedBy!.Email);
+  }
+}
+
+[Test(Team)]
+void an_account_whose_address_was_never_proven_cannot_accept_it() {
+  // Tom's account claims tom@desk.test, but nobody proved it — it could be a stranger who signed up first.
+  Invited("tom@desk.test", AppRole.Agent);
+  runas (Tom) { Assert.Equal(0, MyInvitations().Count); }
+  Invitation? inv = null;
+  runas (Sam) { inv = Invitation.Single(i => i.Email == "tom@desk.test"); }
+  runas (Tom) { Assert.Throws(() => AcceptInvitation(inv!)); }
+  runas (Tom) { Assert.False(RoleGrant.Any(g => g.Member == Tom && g.Role == AppRole.Agent)); }
+}
+
+[Test(Team)]
+void nobody_accepts_an_invitation_sent_to_somebody_else() {
+  Invited("ada@desk.test", AppRole.Admin);
+  Invitation? inv = null;
+  runas (Sam) { inv = Invitation.Single(i => i.Email == "ada@desk.test"); }
+  runas (Lin) {
+    Assert.Equal(0, MyInvitations().Count);
+    Assert.Throws(() => AcceptInvitation(inv!));
+  }
+  runas (Lin) { Assert.False(RoleGrant.Any(g => g.Member == Lin && g.Role == AppRole.Admin)); }
+}
+
+[Test(Team)]
+void a_newcomer_invited_to_a_role_that_needs_two_step_sign_in_gets_no_ticket_before_setting_it_up() {
+  // Admins must use two-step sign-in here. The account is made by the link — and signing in with it is the ordinary
+  // sign-in: setting the second factor up comes before any ticket.
+  var token = Invited("nina@desk.test", AppRole.Admin);
+  Assert.Equal("", JoinByInvitation(token, "nina@desk.test", "Nina", "a-long-password-1"));
+  runas (AuthBootstrap) {
+    var step = SignIn("nina@desk.test", "a-long-password-1");
+    Assert.Equal("", step.Ticket);
+    Assert.True(step.MustEnrol);
+  }
+}
+
+[Test(Team)]
+void an_invitation_into_a_company_makes_a_membership_with_the_role_held_there() {
+  Company? acme = null;
+  Invitation? sent = null;
+  runas (Sam) { acme = Company.Single(c => c.Name == "Acme"); sent = Invite("ada@desk.test", AppRole.CustomerAdmin, organization: acme); }
+  Workflow.Settle(sent!);
+  runas (Ada) { AcceptInvitation(MyInvitations()[0]); }
+  runas (Ada) {
+    var m = Membership.Single(x => x.Member == Ada);
+    Assert.Equal("Acme", m.Organization.Name);
+    Assert.Equal(MembershipSource.Invitation, m.Source);
+    Assert.True(MembershipRole.Any(r => r.Membership == m && r.Role == AppRole.CustomerAdmin));
+    // The role is held at Acme — not in the app.
+    Assert.False(RoleGrant.Any(g => g.Member == Ada && g.Role == AppRole.CustomerAdmin));
+  }
+}

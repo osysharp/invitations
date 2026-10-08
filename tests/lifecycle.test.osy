@@ -1,0 +1,94 @@
+// An invitation's life: reminded, lapsing, revoked, sent again — each a durable run, each killing the old link.
+
+using Osysharp.Identity;
+using Osysharp.Accounts;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[TestFixture]
+void Lifecycle() {
+  var sam = new User { Email = "sam@desk.test", DisplayName = "Sam", PasswordHash = Security.HashPassword("correct-horse-1"),
+                       EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = sam, Role = AppRole.Admin };
+  new User { Email = "mo@desk.test", DisplayName = "Mo", PasswordHash = Security.HashPassword("correct-horse-2"),
+             EmailVerifiedAt = DateTime.UtcNow };
+}
+
+principal Sam => User.Single(u => u.Email == "sam@desk.test");
+principal Mo => User.Single(u => u.Email == "mo@desk.test");
+
+Invitation SentTo(string email) {
+  Invitation? sent = null;
+  runas (Sam) { sent = Invite(email, AppRole.Agent); }
+  Workflow.Settle(sent!);
+  return sent!;
+}
+
+InvitationStatus StatusOf(string email) {
+  InvitationStatus s = InvitationStatus.Pending;
+  runas (Sam) { s = Invitation.Single(i => i.Email == email).Status; }
+  return s;
+}
+
+[Test(Lifecycle)]
+void an_unanswered_invitation_is_reminded_then_lapses_and_its_link_dies() {
+  var inv = SentTo("nina@desk.test");
+  string first = "";
+  runas (AuthBootstrap) { first = InvitationTokenFor("nina@desk.test"); }
+  TestClock.Advance(TimeSpan.FromDays(3));
+  Workflow.Settle(inv);
+  runas (AuthBootstrap) { Assert.Equal(2, InvitationMailsTo("nina@desk.test")); }
+  runas (Sam) { Assert.Equal(1, Invitation.Single(i => i.Email == "nina@desk.test").Reminders); }
+  TestClock.Advance(TimeSpan.FromDays(2));
+  Workflow.Settle(inv);
+  TestClock.Advance(TimeSpan.FromDays(3));
+  Workflow.Settle(inv);
+  Assert.Equal(InvitationStatus.Expired, StatusOf("nina@desk.test"));
+  Assert.NotEqual("", JoinByInvitation(first, "nina@desk.test", "Nina", "a-long-password-1"));
+  runas (Sam) { Assert.False(User.Any(u => u.Email == "nina@desk.test")); }
+}
+
+[Test(Lifecycle)]
+void a_revoked_invitation_cannot_be_accepted() {
+  var inv = SentTo("nina@desk.test");
+  string token = "";
+  runas (AuthBootstrap) { token = InvitationTokenFor("nina@desk.test"); }
+  runas (Sam) { RevokeInvitation(Invitation.Single(i => i.Email == "nina@desk.test")); }
+  Assert.Equal(InvitationStatus.Revoked, StatusOf("nina@desk.test"));
+  Assert.NotEqual("", JoinByInvitation(token, "nina@desk.test", "Nina", "a-long-password-1"));
+  runas (Sam) {
+    Assert.False(User.Any(u => u.Email == "nina@desk.test"));
+    Assert.Equal("sam@desk.test", Invitation.Single(i => i.Email == "nina@desk.test").RevokedBy!.Email);
+  }
+}
+
+[Test(Lifecycle)]
+void sending_again_mails_a_new_link_kills_the_old_and_restarts_its_time() {
+  var inv = SentTo("nina@desk.test");
+  string old = "";
+  runas (AuthBootstrap) { old = InvitationTokenFor("nina@desk.test"); }
+  TestClock.Advance(TimeSpan.FromDays(6));
+  runas (Sam) { ResendInvitation(Invitation.Single(i => i.Email == "nina@desk.test")); }
+  Workflow.Settle(inv);
+  string fresh = "";
+  runas (AuthBootstrap) { fresh = InvitationTokenFor("nina@desk.test"); }
+  Assert.NotEqual(old, fresh);
+  // Past the first invitation's lapse — still open, because its time started over.
+  TestClock.Advance(TimeSpan.FromDays(2));
+  Workflow.Settle(inv);
+  Assert.Equal(InvitationStatus.Pending, StatusOf("nina@desk.test"));
+  Assert.NotEqual("", JoinByInvitation(old, "nina@desk.test", "Nina", "a-long-password-1"));
+  Assert.Equal("", JoinByInvitation(fresh, "nina@desk.test", "Nina", "a-long-password-1"));
+  Assert.Equal(InvitationStatus.Accepted, StatusOf("nina@desk.test"));
+}
+
+[Test(Lifecycle)]
+void only_somebody_who_may_invite_revokes_or_resends() {
+  SentTo("nina@desk.test");
+  Invitation? inv = null;
+  runas (Sam) { inv = Invitation.Single(i => i.Email == "nina@desk.test"); }
+  runas (Mo) { Assert.Throws(() => RevokeInvitation(inv!)); }
+  runas (Mo) { Assert.Throws(() => ResendInvitation(inv!)); }
+  Assert.Equal(InvitationStatus.Pending, StatusOf("nina@desk.test"));
+}

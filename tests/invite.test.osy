@@ -1,0 +1,119 @@
+// Sending an invitation: mailed once, by whoever may invite, granting exactly what it was sent with.
+// SECURITY-INVARIANT(invitations-grant-only-what-was-sent).
+
+using Osysharp.Identity;
+using Osysharp.Accounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[TestFixture]
+void Desk() {
+  var sam = new User { Email = "sam@desk.test", DisplayName = "Sam", PasswordHash = Security.HashPassword("correct-horse-1"),
+                       EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = sam, Role = AppRole.Admin };
+  new User { Email = "mo@desk.test", DisplayName = "Mo", PasswordHash = Security.HashPassword("correct-horse-2"),
+             EmailVerifiedAt = DateTime.UtcNow };
+  var acme = new Company { Name = "Acme" };
+  new Company { Name = "Globex" };
+  var bea = new User { Email = "bea@acme.test", DisplayName = "Bea", PasswordHash = Security.HashPassword("correct-horse-3"),
+                       EmailVerifiedAt = DateTime.UtcNow };
+  var m = new Membership { Organization = acme, Member = bea };
+  new MembershipRole { Membership = m, Role = AppRole.CustomerAdmin };
+}
+
+principal Sam => User.Single(u => u.Email == "sam@desk.test");
+principal Mo => User.Single(u => u.Email == "mo@desk.test");
+principal Bea => User.Single(u => u.Email == "bea@acme.test");
+
+[Test(Desk)]
+void an_invitation_is_mailed_once_with_its_link_after_it_is_saved() {
+  Invitation? sent = null;
+  runas (Sam) { sent = Invite("  Nina@Desk.TEST ", AppRole.Agent, note: "Welcome aboard"); }
+  Workflow.Settle(sent!);
+  runas (AuthBootstrap) {
+    Assert.Equal(1, InvitationMailsTo("nina@desk.test"));
+    Assert.NotEqual("", InvitationTokenFor("nina@desk.test"));
+  }
+  runas (Sam) {
+    var inv = Invitation.Single(i => i.Email == "nina@desk.test");
+    Assert.Equal(InvitationStatus.Pending, inv.Status);
+    Assert.Equal(1, inv.Sends);
+    Assert.NotNull(inv.ExpiresAt);
+  }
+}
+
+[Test(Desk)]
+void pressing_send_twice_is_one_invitation_and_one_mail() {
+  Invitation? first = null;
+  Invitation? second = null;
+  runas (Sam) { first = Invite("nina@desk.test", AppRole.Agent); }
+  runas (Sam) { second = Invite("nina@desk.test", AppRole.Agent); }
+  Workflow.Settle(first!);
+  Assert.Equal(first!.Id, second!.Id);
+  runas (Sam) { Assert.Equal(1, Invitation.Count(i => i.Email == "nina@desk.test")); }
+  runas (AuthBootstrap) { Assert.Equal(1, InvitationMailsTo("nina@desk.test")); }
+}
+
+[Test(Desk)]
+void somebody_who_may_not_invite_cannot() {
+  runas (Mo) { Assert.Denied(() => Invite("nina@desk.test", AppRole.Agent)); }
+}
+
+[Test(Desk)]
+void an_invitation_never_carries_the_sign_in_flows_role() {
+  runas (Sam) { Assert.Denied(() => Invite("nina@desk.test", AppRole.Authenticator)); }
+}
+
+[Test(Desk)]
+void what_an_invitation_grants_is_fixed_when_it_is_sent() {
+  runas (Sam) { Invite("nina@desk.test", AppRole.Agent); }
+  runas (Sam) {
+    var inv = Invitation.Single(i => i.Email == "nina@desk.test");
+    Assert.Denied(() => { inv.Role = AppRole.Admin; });
+  }
+  runas (Sam) {
+    var inv = Invitation.Single(i => i.Email == "nina@desk.test");
+    Assert.Denied(() => { inv.Email = "mallory@desk.test"; });
+  }
+  // (Its status is the run's: assigning it does not compile.)
+}
+
+[Test(Desk)]
+void the_inviter_is_whoever_sent_it() {
+  runas (Sam) {
+    var mo = User.Single(u => u.Email == "mo@desk.test");
+    Assert.Denied(() => new Invitation { Email = "nina@desk.test", Role = AppRole.Agent, InvitedBy = mo });
+  }
+}
+
+[Test(Desk)]
+void a_company_admin_invites_into_their_company_and_nowhere_else() {
+  Company? acme = null;
+  Company? globex = null;
+  runas (Sam) { acme = Company.Single(c => c.Name == "Acme"); globex = Company.Single(c => c.Name == "Globex"); }
+  runas (Bea) {
+    var inv = Invite("carl@acme.test", AppRole.CustomerAdmin, organization: acme);
+    Assert.Equal("Acme", inv.Organization!.Name);
+  }
+  runas (Bea) { Assert.Denied(() => Invite("carl@globex.test", AppRole.CustomerAdmin, organization: globex)); }
+  // …and not to an app-wide role, which would make them staff of the whole app.
+  runas (Bea) { Assert.Denied(() => Invite("carl@acme.test", AppRole.Admin)); }
+}
+
+[Test(Desk)]
+void an_invitation_may_carry_no_role_at_all() {
+  // The floor refuses the sign-in flow's role — and an invitation with NO role is not that role (an unknown `Role ==`
+  // would be, since an unknown deny applies; the floor tests `Role != null` first).
+  runas (Sam) {
+    var sent = Invite("guest@desk.test");
+    Assert.Null(sent.Role);   // read as Sam, who may — outside the block the test is nobody, who reads no invitation
+  }
+}
+
+[Test(Desk)]
+void inviting_somebody_who_already_holds_it_says_so() {
+  runas (Sam) { Assert.Throws(() => Invite("sam@desk.test", AppRole.Admin)); }
+  runas (Sam) { Assert.Throws(() => Invite("not an address", AppRole.Agent)); }
+}

@@ -1,0 +1,210 @@
+namespace Osysharp.Invitations;
+
+using Osysharp.Identity;
+using Osysharp.Accounts;
+using Osysharp.Organizations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+// ── who may invite — the app's to say ────────────────────────────────────────────────────────────────────────────────
+
+/// Who invites people into the app, and revokes and resends invitations. Only the app knows, so the app DEFINES it (a
+/// missing definition is a compile error naming it):
+///   `policy MayInvite => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Admin);`
+/// More — an organisation's own admin inviting into that organisation — is an ordinary grant on `Invitation`:
+///   `partial entity Invitation { security { allow create where Organization != null && HoldsRoleIn(Organization, AppRole.CompanyAdmin); } }`
+policy MayInvite;
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+/// Where an invitation stands — moved by its run alone.
+public enum InvitationStatus {
+  /// Sent, waiting for an answer.
+  [Label("Waiting")] Pending,
+  [Label("Accepted")] Accepted,
+  [Label("Revoked")] Revoked,
+  /// Its time ran out unanswered.
+  [Label("Expired")] Expired,
+}
+
+/// An invitation for one ADDRESS to join the app — with `Role`, and within `Organization` when it names one. Everything
+/// it will grant is fixed when it is sent: nobody edits an invitation into a bigger one, and accepting cannot choose.
+///
+/// SECURITY-INVARIANT(invitations-answered-only-by-the-invited-address): an invitation is accepted only by the address it
+/// was sent to — by a NEWCOMER through the mailed link (whose token is single-use and stored only as a hash, and which
+/// makes an account for that address and no other), or by an EXISTING account only through the app, signed in — every
+/// step, the second factor included — with that address PROVEN. Holding the mailbox never accepts for an account
+/// (a password reset would at least ask for its second factor), and having typed the address never accepts as it.
+/// Guarded by tests/accept.test.osy.
+///
+/// SECURITY-INVARIANT(invitations-grant-only-what-was-sent): what an invitation grants is fixed at send — its address,
+/// role and organisation are never edited, it never carries the sign-in flow's `Authenticator` role, and the person it
+/// names as the inviter is whoever sent it. Floors, so no grant the app writes loosens them. Guarded by
+/// tests/invite.test.osy.
+[Authority(Extensible)]
+public entity Invitation {
+  /// The address invited — normalised (`NormalisedEmail`), the only one that may answer.
+  [Required("Say who to invite — an address."), MaxLength(255)] string Email;
+  /// The app role the person will hold — or, with `Organization`, the role they will hold there. None: they join with
+  /// no role (or as a plain member of the organisation).
+  role? Role;
+  /// The organisation they are invited into, if any.
+  Organization? Organization;
+  /// A line from the inviter, quoted in the mail.
+  [MaxLength(1000)] string? Note;
+  [Required] Principal InvitedBy;
+  /// How long it stays open from when it was last sent.
+  TimeSpan ValidFor = TimeSpan.FromDays(7);
+  /// When to remind an invitee who has not answered, and how often after that (zero: once).
+  TimeSpan RemindAfter = TimeSpan.FromDays(3);
+  TimeSpan RemindEvery = TimeSpan.FromDays(2);
+  DateTime? SentAt;
+  int Sends = 0;
+  int Reminders = 0;
+  /// When it lapses, unanswered — from the last time it was sent.
+  DateTime? ExpiresAt;
+  InvitationStatus Status;
+  Principal? AcceptedBy;
+  DateTime? AcceptedAt;
+  /// Who revoked it, or last resent it — written by the person doing it, as they do it (`RevokeInvitation`,
+  /// `ResendInvitation`), which is what asks whether they may: the write needs the app's `update` grant.
+  Principal? RevokedBy;
+  Principal? LastSentBy;
+
+  security {
+    allow read, create, update when MayInvite;
+    // The invitee sees what they are invited to — once they have proven they are its address.
+    allow read when IsAuthenticated && user.EmailVerifiedAt != null where Email == user.Email;
+    // `Role != null` first: an invitation with no role is unknown to `Role == …`, and an unknown deny applies.
+    deny create where Role != null && Role == role.Authenticator;
+    deny create where InvitedBy != user;
+    // Fixed at send — what it grants, to whom, and from whom.
+    deny update Email;
+    deny update Role;
+    deny update Organization;
+    deny update InvitedBy;
+    deny update ValidFor;
+    // Its run's record — moved by the run alone (which writes as the system), never by a person.
+    deny update SentAt;
+    deny update Sends;
+    deny update Reminders;
+    deny update ExpiresAt;
+    deny update AcceptedBy;
+    deny update AcceptedAt;
+  }
+}
+
+// ── the run ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// What a newcomer's answer carries over the mailed link — the address they typed (it must be the invited one), the name
+/// they gave, and their password's hash (never the password).
+public class JoinAnswer {
+  [ExternalName("email")] public string Email = "";
+  [ExternalName("name")] public string Name = "";
+  [ExternalName("passwordHash")] public string PasswordHash = "";
+}
+
+workflow InvitationFlow {
+  Tracks    = Invitation.Status;
+  Autostart = true;
+  Initial   = Pending;
+
+  /// Accepted. Raised by the invitee in the app — signed in, with the invited address proven — or answered over the
+  /// mailed link by a newcomer, which carries no principal at all (the link is the permission, and it can only make an
+  /// account for the invited address).
+  [Authorize(u => u.Email == this.Item.Email && u.EmailVerifiedAt != null)]
+  event Accept(string? email, string? name, string? passwordHash);
+  event Revoke();
+  event Resend();
+
+  on Revoke { goto Revoked; }
+
+  state Pending {
+    // ⚑ CANDIDATES ARE THE INVITED ADDRESS, PROVEN — so the in-app door (and a work list showing it) is that person's
+    //   alone. The mailed link answers this same slot with no principal; its handler makes an account for the invited
+    //   address only, and refuses an address that already has one (that person signs in and accepts here instead).
+    subscribe Accept() as Acceptance {
+      Candidates = u => u.Email == this.Item.Email && u.EmailVerifiedAt != null;
+      Finished {
+        Within = this.Item.ValidFor;
+        Accrues = false;
+        Remind Chase(After = this.Item.RemindAfter, ThenEvery = this.Item.RemindEvery, Accrues = false) {
+          this.Item.Reminders = this.Item.Reminders + 1;
+          MailInvitation(this.Item, Acceptance.CallbackUrl(), true);
+        }
+        Unfinished { goto Expired; }
+      }
+    }
+
+    // The mail goes out on a clock due at once, not in `enter`: an autostarted run's first step is part of the commit
+    // that saved the invitation, and a send there would hold that commit (lint workflow-first-step-waits-on-a-slow-call).
+    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    on Expire {
+      var now = DateTime.UtcNow;
+      this.Item.SentAt = now;
+      this.Item.Sends = this.Item.Sends + 1;
+      this.Item.ExpiresAt = now + this.Item.ValidFor;
+      MailInvitation(this.Item, Acceptance.CallbackUrl(), false);
+    }
+
+    // Sent again: the state is entered afresh, so the old link dies with its slot, a new one is mailed, and the time it
+    // stays open starts over.
+    on Resend { goto Pending; }
+
+    on Acceptance(string? email, string? name, string? passwordHash) {
+      var invitation = this.Item;
+      Principal? who = actor;
+      if (who == null) {
+        // The mailed link — a newcomer. Only for the invited address, and only when it has no account yet.
+        if (email == null || NormalisedEmail(email) != invitation.Email) {
+          throw new ValidationException("This invitation was sent to another address. Type the address it came to.");
+        }
+        if (Principal.Any(p => p.Email == invitation.Email)) {
+          throw new ValidationException("That address already has an account. Sign in, and accept the invitation there.");
+        }
+        if (passwordHash == null || passwordHash == "") {
+          throw new ValidationException("Choose a password to make your account.");
+        }
+        who = NewInvitedAccount(invitation, name ?? "", passwordHash);
+      }
+      GrantWhatWasSent(invitation, who!);
+      invitation.AcceptedBy = who;
+      invitation.AcceptedAt = DateTime.UtcNow;
+      goto Accepted;
+    }
+  }
+
+  terminal success Accepted { }
+  terminal cancel  Revoked  { Message = "invitation revoked"; }
+  terminal error   Expired  { Message = "invitation expired"; }
+}
+
+/// The account a newcomer makes by accepting — the app's own kind (`AccountsSetup.Kinds`), for the invited address,
+/// with the address proven (the mail it came by was opened) and the password they chose.
+User NewInvitedAccount(Invitation invitation, string name, string passwordHash) {
+  var shown = name.Trim();
+  var account = App.Setting<InvitationsSetup>().Accounts.New(invitation, invitation.Email, shown);
+  if (account.Email != invitation.Email) {
+    throw new ValidationException("The app's InvitationAccounts.New made an account for another address — it must use the one it was given.");
+  }
+  var now = DateTime.UtcNow;
+  account.PasswordHash = passwordHash;
+  account.PasswordChangedAt = now;
+  account.EmailVerifiedAt = now;
+  account.DisplayName = shown != "" ? shown : invitation.Email.Substring(0, invitation.Email.IndexOf("@"));
+  return account;
+}
+
+/// Grant what the invitation was sent with — the app role, or the organisation and the role held in it. Nothing else.
+void GrantWhatWasSent(Invitation invitation, Principal who) {
+  if (invitation.Organization != null) {
+    var org = invitation.Organization!;
+    Join(org, who, MembershipSource.Invitation);
+    if (invitation.Role != null) { GrantIn(org, who, invitation.Role.Value); }
+    return;
+  }
+  if (invitation.Role != null && !RoleGrant.Any(g => g.Member == who && g.Role == invitation.Role.Value)) {
+    new RoleGrant { Member = who, Role = invitation.Role.Value };
+    // The app is told in the acceptance's own write — an invited agent is put on the desk's queues as they arrive.
+    App.Setting<RolesSetup>().Events.Granted(who, invitation.Role.Value);
+  }
+}

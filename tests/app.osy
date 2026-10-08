@@ -1,0 +1,14 @@
+// The producer's test project for Osysharp.Invitations — a team app closed to sign-up, so an invitation is the only way
+// in: its admins invite teammates with a role, and a customer company's own admin invites colleagues into that company.
+app InvitationsKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Mail@0;
+  use Osysharp.EmailTemplates@0;
+  use Osysharp.Accounts@0;
+  use Osysharp.Organizations@0;
+  use Osysharp.Invitations@0;
+  use Osysharp.Workflow;
+}
+
