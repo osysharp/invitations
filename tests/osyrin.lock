@@ -6,8 +6,8 @@
     {
       "name": "Osysharp.Accounts",
       "kind": "package",
-      "version": "1.0.0",
-      "hash": "sha256:255191db83d3be6d5f11bcede79d98dea5864d4713e9cf00e4a52b9b05b47f51",
+      "version": "1.0.1",
+      "hash": "sha256:f7e4103a4235c3512a463015e750632d910fd8cb4255afcf4cd7edbcae253812",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/accounts",
@@ -83,8 +83,8 @@
     {
       "name": "Osysharp.Invitations",
       "kind": "package",
-      "version": "0.4.0",
-      "hash": "sha256:3902529ded6741563fceb360223c8301170f9c37b1a478866013a2f68bc27a6b",
+      "version": "0.4.1",
+      "hash": "sha256:00c41a4d30f98e3d0fdaccf31ed54c3ce8c49f0dc9c9cee0c3fc9cbb0ea0e85e",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/invitations",

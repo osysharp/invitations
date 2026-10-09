@@ -14,7 +14,7 @@
 // ⚑ THE APP SAYS WHO MAY INVITE:   policy MayInvite => IsAdmin;
 //   …and, if it likes, more (an organisation's own admin inviting into it) as an ordinary grant on `Invitation`.
 package Osysharp.Invitations {
-  version     "0.4.0";
+  version     "0.4.1";
   minPlatform "0.9.0";
   summary     "invite a person by address with their role (and organisation) fixed when it is sent — mailed, reminded, expiring, revocable and resendable as a durable run; answered only by the invited address: a newcomer through a single-use mailed link, an existing account only once fully signed in (its second step included) and with that address proven.";
   model "model/**/*.osy";

@@ -6,8 +6,8 @@
     {
       "name": "Osysharp.Accounts",
       "kind": "package",
-      "version": "1.0.0",
-      "hash": "sha256:255191db83d3be6d5f11bcede79d98dea5864d4713e9cf00e4a52b9b05b47f51",
+      "version": "1.0.1",
+      "hash": "sha256:f7e4103a4235c3512a463015e750632d910fd8cb4255afcf4cd7edbcae253812",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/accounts",
