@@ -8,7 +8,7 @@ hold it in — fixed when the invitation is sent. Mailed, reminded, lapsing, rev
 ```osy
 // app.osy
 use Osysharp.Identity@0;
-use Osysharp.Accounts@0;
+use Osysharp.Accounts@1;
 use Osysharp.Organizations@0;
 use Osysharp.Invitations@0;
 ```
