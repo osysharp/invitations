@@ -148,7 +148,7 @@ public component InvitationScreen(string token) {
 }
 
 /// The page the mail links to — anybody may open it; the link (or a full sign-in) is what answers it.
-[Page("/invite/{token}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
+[Route("/invite/{token}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
 public component InvitationPage(string token) { render { InvitationScreen(token); } }
 
 /// Send an invitation — an address, one of the roles the app offers (`app.Roles`), and an optional line. With `into`, to

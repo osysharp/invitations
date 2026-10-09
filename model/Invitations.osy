@@ -42,6 +42,7 @@ public enum InvitationStatus {
 /// tests/invite.test.osy.
 [Authority(Extensible)]
 public entity Invitation {
+  [CreatedAt] DateTime? CreatedAt;
   /// The address invited — normalised (`NormalisedEmail`), the only one that may answer.
   [Required("Say who to invite — an address."), MaxLength(255)] string Email;
   /// The app role the person will hold — or, with `Organization`, the role they will hold there. None: they join with

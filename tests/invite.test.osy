@@ -97,7 +97,9 @@ void a_company_admin_invites_into_their_company_and_nowhere_else() {
     var inv = Invite("carl@acme.test", AppRole.CustomerAdmin, organization: acme);
     Assert.Equal("Acme", inv.Organization!.Name);
   }
-  runas (Bea) { Assert.Denied(() => Invite("carl@globex.test", AppRole.CustomerAdmin, organization: globex)); }
+  // Another company is one Bea cannot even read, so the call is refused before it runs — as not found, which says
+  // nothing about whether it exists.
+  runas (Bea) { Assert.Throws<NotFoundException>(() => Invite("carl@globex.test", AppRole.CustomerAdmin, organization: globex)); }
   // …and not to an app-wide role, which would make them staff of the whole app.
   runas (Bea) { Assert.Denied(() => Invite("carl@acme.test", AppRole.Admin)); }
 }
