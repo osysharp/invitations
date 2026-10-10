@@ -1,7 +1,7 @@
 // An invitation's life: reminded, lapsing, revoked, sent again — each a durable run, each killing the old link.
 
 using Osysharp.Identity;
-using Osysharp.Accounts;
+using Osysharp.UserAccounts;
 using Osysharp.Invitations;
 using Osysharp.Mail;
 using Osysharp.Workflow;

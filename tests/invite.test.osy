@@ -2,7 +2,7 @@
 // SECURITY-INVARIANT(invitations-grant-only-what-was-sent).
 
 using Osysharp.Identity;
-using Osysharp.Accounts;
+using Osysharp.UserAccounts;
 using Osysharp.Organizations;
 using Osysharp.Invitations;
 using Osysharp.Mail;

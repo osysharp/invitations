@@ -1,7 +1,7 @@
 // Everything this app writes about inviting: its roles, who may invite, how its roles read, and what a customer
 // company's own admin may do.
 using Osysharp.Identity;
-using Osysharp.Accounts;
+using Osysharp.UserAccounts;
 using Osysharp.Organizations;
 using Osysharp.Invitations;
 

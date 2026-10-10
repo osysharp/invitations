@@ -1,7 +1,7 @@
 namespace Osysharp.Invitations;
 
 using Osysharp.Identity;
-using Osysharp.Accounts;
+using Osysharp.UserAccounts;
 using Osysharp.Organizations;
 using Osysharp.Mail;
 using Osysharp.Workflow;
