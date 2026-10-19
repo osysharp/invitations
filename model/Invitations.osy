@@ -34,7 +34,9 @@ public enum InvitationStatus {
 /// makes an account for that address and no other), or by an EXISTING account only through the app, signed in — every
 /// step, the second factor included — with that address PROVEN. Holding the mailbox never accepts for an account
 /// (a password reset would at least ask for its second factor), and having typed the address never accepts as it.
-/// Guarded by tests/accept.test.osy.
+/// One exception, chosen by the inviter when they send it (`AnotherAddressAllowed`): a newcomer may make their account
+/// for ANOTHER address — but only one PROVEN by a confirmation mailed to it (`AddressProof`), before the account is made.
+/// Guarded by tests/accept.test.osy and tests/another-address.test.osy.
 ///
 /// SECURITY-INVARIANT(invitations-grant-only-what-was-sent): what an invitation grants is fixed at send — its address,
 /// role and organisation are never edited, it never carries the sign-in flow's `Authenticator` role, and the person it
@@ -70,8 +72,14 @@ public entity Invitation {
   /// `ResendInvitation`), which is what asks whether they may: the write needs the app's `update` grant.
   Principal? RevokedBy;
   Principal? LastSentBy;
+  /// Whether the newcomer may make their account for ANOTHER address than the one invited — proven by a confirmation
+  /// mailed to it before the account is made. Off unless the inviter says so; fixed at send.
+  bool AnotherAddressAllowed = false;
 
   security {
+    // The mailed link's key reads the invitation it was made for — the page shows the invited address from it, so the
+    // newcomer never types it.
+    allow read by InvitationKey;
     allow read, create, update when MayInvite;
     // The invitee sees what they are invited to — once they have proven they are its address.
     allow read when IsAuthenticated && user.EmailVerifiedAt != null where Email == user.Email;
@@ -84,6 +92,7 @@ public entity Invitation {
     deny update Organization;
     deny update InvitedBy;
     deny update ValidFor;
+    deny update AnotherAddressAllowed;
     // Its run's record — moved by the run alone (which writes as the system), never by a person.
     deny update SentAt;
     deny update Sends;
@@ -102,6 +111,54 @@ public class JoinAnswer {
   [ExternalName("email")] public string Email = "";
   [ExternalName("name")] public string Name = "";
   [ExternalName("passwordHash")] public string PasswordHash = "";
+  /// For another address than the invited one: the `AddressProof` its confirmation mail carried.
+  [ExternalName("proof")] public string Proof = "";
+}
+
+/// The key the mailed link carries beside its single-use token: it reads the invitation it was made for, so the page can
+/// show the invited address (and whether another may be used) to a newcomer who is not signed in. It reads, and nothing
+/// more — accepting still takes the token.
+public grant InvitationKey for Invitation { Expires = TimeSpan.FromDays(400); }
+
+// ⚠ Appended, never inserted.
+public enum InvitationAddressState { [Label("Asked")] Asked, [Label("Mailed")] Mailed }
+
+/// Another address a newcomer asked to join with, for an invitation that allows one (`AnotherAddressAllowed`). Its run
+/// mails the address a confirmation link carrying an `AddressProof`; only that link makes an account for it.
+public entity InvitationAddress {
+  [CreatedAt] DateTime? CreatedAt;
+  [Required] Invitation Invitation;
+  /// The other address — normalised.
+  [Required, MaxLength(255)] string Email;
+  /// The invitation's single-use token the newcomer holds — carried on into the confirmation link, which needs it to
+  /// accept. The holder of the invitation's key already has it.
+  [Required, MaxLength(200)] string Token;
+  InvitationAddressState State;
+
+  security {
+    allow read, create by InvitationKey where Invitation == InvitationKey.Row;
+    allow read by AddressProof;
+    deny update Invitation, Email, Token;
+  }
+}
+
+/// The link mailed to another address: holding it proves the address received it.
+public grant AddressProof for InvitationAddress { Expires = TimeSpan.FromDays(7); }
+
+workflow InvitationAddressFlow {
+  Tracks    = InvitationAddress.State;
+  Autostart = true;
+  Initial   = Asked;
+
+  // On a clock due at once, not in `enter` — the mail would hold the commit that saved the row.
+  state Asked {
+    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    on Expire {
+      MailAddressConfirmation(this.Item);
+      goto Mailed;
+    }
+  }
+  terminal success Mailed { }
 }
 
 workflow InvitationFlow {
@@ -113,7 +170,7 @@ workflow InvitationFlow {
   /// mailed link by a newcomer, which carries no principal at all (the link is the permission, and it can only make an
   /// account for the invited address).
   [Authorize(u => u.Email == this.Item.Email && u.EmailVerifiedAt != null)]
-  event Accept(string? email, string? name, string? passwordHash);
+  event Accept(string? email, string? name, string? passwordHash, string? proof);
   event Revoke();
   event Resend();
 
@@ -151,21 +208,23 @@ workflow InvitationFlow {
     // stays open starts over.
     on Resend { goto Pending; }
 
-    on Acceptance(string? email, string? name, string? passwordHash) {
+    on Acceptance(string? email, string? name, string? passwordHash, string? proof) {
       var invitation = this.Item;
       Principal? who = actor;
       if (who == null) {
-        // The mailed link — a newcomer. Only for the invited address, and only when it has no account yet.
-        if (email == null || NormalisedEmail(email) != invitation.Email) {
-          throw new ValidationException("This invitation was sent to another address. Type the address it came to.");
+        // The mailed link — a newcomer. Only for the invited address — or, when the invitation allows it, another
+        // address PROVEN by its confirmation mail — and only when it has no account yet.
+        var address = email == null ? "" : NormalisedEmail(email);
+        if (address == "" || (address != invitation.Email && !ProvesAddress(invitation, address, proof))) {
+          throw new ValidationException("This invitation was sent to another address — it can make an account only for that one.");
         }
-        if (Principal.Any(p => p.Email == invitation.Email)) {
+        if (Principal.Any(p => p.Email == address)) {
           throw new ValidationException("That address already has an account. Sign in, and accept the invitation there.");
         }
         if (passwordHash == null || passwordHash == "") {
           throw new ValidationException("Choose a password to make your account.");
         }
-        who = NewInvitedAccount(invitation, name ?? "", passwordHash);
+        who = NewInvitedAccount(invitation, address, name ?? "", passwordHash);
       }
       GrantWhatWasSent(invitation, who!);
       invitation.AcceptedBy = who;
@@ -179,20 +238,40 @@ workflow InvitationFlow {
   terminal error   Expired  { Message = "invitation expired"; }
 }
 
-/// The account a newcomer makes by accepting — the app's own kind (`AccountsSetup.Kinds`), for the invited address,
-/// with the address proven (the mail it came by was opened) and the password they chose.
-User NewInvitedAccount(Invitation invitation, string name, string passwordHash) {
+/// The account a newcomer makes by accepting — the app's own kind (`AccountsSetup.Kinds`), for `address` (the invited
+/// one, or another the invitation allows and a confirmation mail proved), with that address proven (the mail it came by
+/// was opened) and the password they chose.
+User NewInvitedAccount(Invitation invitation, string address, string name, string passwordHash) {
   var shown = name.Trim();
-  var account = App.Setting<InvitationsSetup>().Accounts.New(invitation, invitation.Email, shown);
-  if (account.Email != invitation.Email) {
+  var account = App.Setting<InvitationsSetup>().Accounts.New(invitation, address, shown);
+  if (account.Email != address) {
     throw new ValidationException("The app's InvitationAccounts.New made an account for another address — it must use the one it was given.");
   }
   var now = DateTime.UtcNow;
   account.PasswordHash = passwordHash;
   account.PasswordChangedAt = now;
   account.EmailVerifiedAt = now;
-  account.DisplayName = shown != "" ? shown : invitation.Email.Substring(0, invitation.Email.IndexOf("@"));
+  account.DisplayName = shown != "" ? shown : address.Substring(0, address.IndexOf("@"));
   return account;
+}
+
+/// Does `proof` — the text of an `AddressProof` — prove `address` for `invitation`, which allows another address? A
+/// proof is the link mailed to that address for this invitation; anything else proves nothing.
+bool ProvesAddress(Invitation invitation, string address, string? proof) {
+  if (!invitation.AnotherAddressAllowed || proof == null || proof == "") { return false; }
+  try {
+    var p = AddressProof.From(proof);
+    return p.Row.Invitation.Id == invitation.Id && p.Row.Email == address;
+  }
+  catch (Exception e) { return false; }
+}
+
+/// Mail `asked`'s address the link that proves it — the run's.
+void MailAddressConfirmation(InvitationAddress asked) {
+  var invitation = asked.Invitation;
+  var link = AccountsLink($"/invite/{InvitationKey.For(invitation)}/{asked.Token}/as/{AddressProof.For(asked)}");
+  var mail = App.Setting<InvitationsSetup>().Mails.AddressConfirmation(invitation, asked.Email, link);
+  SendRendered(asked.Email, mail, $"invitation-address-{asked.Id}");
 }
 
 /// Grant what the invitation was sent with — the app role, or the organisation and the role held in it. Nothing else.

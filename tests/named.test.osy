@@ -1,0 +1,64 @@
+// WHO SENT AN INVITATION IS NAMED — on the page and in the mail — whatever the account holds. Measured on the beta,
+// 2026-10-14: an operator account made without a name sent one, and the organization's page read "invited by" with
+// nothing after it, while the invitee's mail began " invited you to …". `InviterName` (and, under it, the Identity kit's
+// `PersonName`) is what both now say: the name, else the address, else "someone at <organization>".
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[TestFixture]
+void DeskWithANamelessAdmin() {
+  // An admin as `osy user add` makes one: an address, no name.
+  var ned = new User { Email = "ned@desk.test", PasswordHash = Security.HashPassword("correct-horse-9"), EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = ned, Role = AppRole.Admin };
+  // A system account: an address no message reaches, and no name.
+  var bot = new User { Email = "the-desk@desk.invalid", PasswordHash = Security.HashPassword("correct-horse-8"), EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = bot, Role = AppRole.Admin };
+  new Company { Name = "Acme" };
+}
+
+principal Ned => User.Single(u => u.Email == "ned@desk.test");
+principal Bot => User.Single(u => u.Email == "the-desk@desk.invalid");
+
+/// The newest invitation mail's text to `to`.
+string InvitationTextTo(string to) {
+  var mail = OutgoingMail.Where(m => m.To == to && m.Text != null && m.Text.Contains("/invite/"))
+    .OrderByDescending(m => m.CreatedAt).FirstOrDefault();
+  return mail == null ? "" : (mail.Text ?? "");
+}
+
+[Test(DeskWithANamelessAdmin)]
+void an_inviter_without_a_name_is_named_by_their_address_in_the_mail() {
+  Invitation? sent = null;
+  runas (Ned) { sent = Invite("nina@desk.test", AppRole.Agent); }
+  Workflow.Settle(sent!);
+  runas (AuthBootstrap) {
+    var text = InvitationTextTo("nina@desk.test");
+    Assert.Contains("ned@desk.test invited nina@desk.test to join", text);
+  }
+}
+
+[Test(DeskWithANamelessAdmin)]
+void a_system_inviter_is_someone_at_the_organization_never_a_blank_or_an_unreachable_address() {
+  Invitation? sent = null;
+  runas (Bot) { sent = Invite("ola@acme.test", AppRole.CustomerAdmin, Company.Single(c => c.Name == "Acme")); }
+  Workflow.Settle(sent!);
+  runas (AuthBootstrap) {
+    var text = InvitationTextTo("ola@acme.test");
+    Assert.Contains("someone at Acme invited ola@acme.test to join Acme", text);
+    Assert.DoesNotContain("the-desk@desk.invalid", text);
+  }
+}
+
+[Test(DeskWithANamelessAdmin)]
+void the_waiting_list_names_an_inviter_without_a_name() {
+  runas (Ned) { Invite("nina@desk.test", AppRole.Agent); }
+  Ui.SignInAs(User.Single(u => u.Email == "ned@desk.test"));
+  Ui.Visit("/team");
+  Assert.Visible("nina@desk.test");
+  Assert.Visible("Agent · invited by ned@desk.test");
+}

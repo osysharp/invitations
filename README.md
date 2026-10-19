@@ -17,16 +17,19 @@ use Osysharp.Invitations@0;
 using Osysharp.Identity;
 using Osysharp.Invitations;
 
-[Role] enum AppRole { Authenticator, Agent, Admin }
+[Role] enum AppRole { Authenticator, Agent, Admin, CompanyAdmin }
 policy IsAdmin => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Admin);
 
 policy MayInvite => IsAdmin;                 // who invites (and revokes, and resends)
 policy ManagesOrganizations => IsAdmin;      // Osysharp.Organizations' one question
 
-// How the app's roles read to people — what the invite form offers. A role not listed is never offered.
+// How the app's roles read to people — what the invite form offers. A role not listed is never offered, and one held
+// only inside an organisation is offered only on an invitation into one.
 app.Roles = new RolesSetup { Offered = [
   new RoleChoice { Role = AppRole.Agent, Label = "Agent", Description = "Works tickets." },
   new RoleChoice { Role = AppRole.Admin, Label = "Admin", Description = "Runs the desk." },
+  new RoleChoice { Role = AppRole.CompanyAdmin, Label = "Company admin", Description = "Looks after their company's people.",
+                   HeldIn = RoleScope.Organization },
 ] };
 ```
 
@@ -50,6 +53,9 @@ From code: `Invite("ada@acme.com", AppRole.Agent)`, `Invite(email, AppRole.Compa
   when the invitation is revoked, resent or lapses, and makes an account **for the invited address and no other** —
   proven, since the mail was opened. Signing in is then the ordinary sign-in: an app that requires two-step sign-in of
   the role sets it up before any ticket.
+- The page **shows** the invited address, read from the link — it is never typed. When the inviter ticked "They may
+  join with another address" (`Invite(…, anotherAddress: true)`, off by default), the newcomer may choose another one:
+  a confirmation link is mailed to it, and only that link makes the account.
 - **Somebody who has an account** signs in — every step, the second factor included — and accepts in the app. Only an
   account whose address is the invited one, **and proven**, may: an account a stranger made with somebody else's address
   first cannot accept that person's invitation. The link does **not** accept for an existing account — holding a mailbox

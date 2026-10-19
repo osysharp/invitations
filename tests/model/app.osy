@@ -18,7 +18,8 @@ app.Accounts = new AccountsSetup {
 app.Roles = new RolesSetup { Offered = [
   new RoleChoice { Role = AppRole.Agent, Label = "Agent", Description = "Works the desk." },
   new RoleChoice { Role = AppRole.Admin, Label = "Admin", Description = "Runs the desk." },
-  new RoleChoice { Role = AppRole.CustomerAdmin, Label = "Company admin", Description = "Looks after their company's people." },
+  new RoleChoice { Role = AppRole.CustomerAdmin, Label = "Company admin", Description = "Looks after their company's people.",
+                   HeldIn = RoleScope.Organization },
 ] };
 
 /// Admins must use two-step sign-in.

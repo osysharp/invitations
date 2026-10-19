@@ -1,0 +1,10 @@
+// The desk's team page — the kit's waiting-invitations list, as an app puts it on a page.
+using Osysharp.Invitations;
+
+[Route("/team")]
+[Title("Team")]
+[Authorize(IsAdmin)]
+[Render(CSR)]
+component TeamPage() {
+  render { InvitationList(); }
+}

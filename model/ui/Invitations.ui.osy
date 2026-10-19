@@ -28,7 +28,7 @@ public class InvitationView {
 
 InvitationView ViewOf(Invitation i) {
   return new InvitationView {
-    Id = i.Id, Email = i.Email, Into = InvitedInto(i), From = i.InvitedBy.DisplayName,
+    Id = i.Id, Email = i.Email, Into = InvitedInto(i), From = InviterName(i),
     RoleName = i.Role == null ? "" : RoleLabel(i.Role.Value), ExpiresAt = i.ExpiresAt, Sends = i.Sends,
   };
 }
@@ -67,9 +67,14 @@ public void ResendInvitationById(Guid id) { ResendInvitation(Invitation.Single(x
 /// What the invitee sees at the mailed link: signed out, a choice — make an account for the invited address (with the
 /// link), or sign in to the one they have; signed in, the invitations waiting for their proven address, to accept.
 [Composable]
-public component InvitationAnswer(string token) {
+public component InvitationAnswer(InvitationKey key, string token) {
   live var me = Session.CurrentUser;
   bool newcomer = true;
+  // The invited address, read from the link's key on the server — shown, never typed.
+  InvitedView? invited = null;
+  bool otherAddress = false;
+  string other = "";
+  string asked = "";
   string email = "";
   string name = "";
   string password = "";
@@ -78,11 +83,21 @@ public component InvitationAnswer(string token) {
   List<InvitationView> waiting = [];
   string accepted = "";
 
-  on mount { if (Session.CurrentUser != null) { waiting = MyInvitationViews(); } }
+  on mount {
+    invited = InvitationByKey(key);
+    if (Session.CurrentUser != null) { waiting = MyInvitationViews(); }
+  }
 
   action Join() {
+    email = invited!.Email;
     problem = JoinByInvitation(token, email, name, password);
     if (problem == "") { joined = true; }
+  }
+  action UseAnother() { otherAddress = true; problem = ""; }
+  action UseInvited() { otherAddress = false; problem = ""; }
+  action AskForOther() {
+    problem = AskToJoinAs(key, token, other);
+    if (problem == "") { asked = other.Trim().ToLower(); }
   }
   action Accept(Guid id) {
     problem = "";
@@ -126,16 +141,33 @@ public component InvitationAnswer(string token) {
           Button("I'm new here", onPress: ShowNew, tone: newcomer ? Tone.Primary : Tone.Ghost);
           Button("I have an account", onPress: ShowExisting, tone: newcomer ? Tone.Ghost : Tone.Primary);
         }
-        if (newcomer) {
+        if (invited != null && !invited!.Open) {
+          Alert("This invitation is no longer open — it may have been withdrawn, or it expired.", tone: Tone.Default);
+        } else if (newcomer && asked != "") {
+          Alert($"We sent a link to {asked}. Open it to confirm the address and make your account.", tone: Tone.Success);
+        } else if (newcomer && otherAddress) {
+          Text($"You were invited at {invited!.Email}. Join with another address — we mail it a link to confirm it is yours, and the account is made from that link.",
+               color: Colors.TextMuted);
+          Field("Your address", value: other, type: "email", placeholder: "name@company.com", onEnter: AskForOther);
+          if (problem != "") { Alert(problem, tone: Tone.Danger); }
+          Row(gap: 2, align: Align.Center) {
+            Button("Send me a link", onPress: AskForOther, tone: Tone.Primary);
+            Button($"Use {invited!.Email}", onPress: UseInvited, tone: Tone.Ghost);
+          }
+        } else if (newcomer && invited != null) {
           Text("Make your account — for the address this invitation was sent to.", color: Colors.TextMuted);
+          Stack(gap: 0, role: UiRole.Group, label: "Invited address") {
+            Text("Email", fontSize: FontSize.Caption, fontWeight: FontWeight.Medium);
+            Text(invited!.Email, fontWeight: FontWeight.Semibold);
+          }
           Field("Your name", value: name, placeholder: "How colleagues see you");
-          Field("Email", value: email, type: "email", placeholder: "The address the invitation came to");
           Field("Password", value: password, type: "password", onEnter: Join, hint: "At least ten characters.");
           if (problem != "") { Alert(problem, tone: Tone.Danger); }
           Button("Join", onPress: Join, tone: Tone.Primary, size: Size.Lg);
-        } else {
+          if (invited!.AnotherAddressAllowed) { Button("Join with another address", onPress: UseAnother, tone: Tone.Ghost, size: Size.Sm); }
+        } else if (!newcomer) {
           Text("Sign in, and accept the invitation here.", color: Colors.TextMuted);
-          SignInForm(then: "/invite/" + token);
+          SignInForm(then: $"/invite/{key}/" + token);
         }
       }
     }
@@ -143,13 +175,53 @@ public component InvitationAnswer(string token) {
 }
 
 [Composable]
-public component InvitationScreen(string token) {
-  render { AccountsFrame("You are invited", sub: "Answer it with the address it was sent to.") { InvitationAnswer(token); } }
+public component InvitationScreen(InvitationKey key, string token) {
+  render { AccountsFrame("You are invited", sub: "Answer it with the address it was sent to.") { InvitationAnswer(key, token); } }
 }
 
 /// The page the mail links to — anybody may open it; the link (or a full sign-in) is what answers it.
-[Route("/invite/{token}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
-public component InvitationPage(string token) { render { InvitationScreen(token); } }
+[Route("/invite/{key}/{token}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
+public component InvitationPage(InvitationKey key, string token) { render { InvitationScreen(key, token); } }
+
+/// What a newcomer sees from the confirmation link mailed to another address: that address, proven, and the account to
+/// make for it.
+[Composable]
+public component ProvenAddressAnswer(AddressProof proof, string token) {
+  string address = "";
+  string name = "";
+  string password = "";
+  string problem = "";
+  bool joined = false;
+  on mount { address = ProvenAddress(proof); }
+  action Join() {
+    problem = JoinByInvitationAs(proof, token, name, password);
+    if (problem == "") { joined = true; }
+  }
+  render {
+    Stack(gap: 3) {
+      if (joined) {
+        Alert("Your account is ready. Sign in — and you are in.", tone: Tone.Success);
+        SignInForm(email: address, password: password);
+      } else {
+        Text("Your address is confirmed. Make your account for it.", color: Colors.TextMuted);
+        Stack(gap: 0, role: UiRole.Group, label: "Confirmed address") {
+          Text("Email", fontSize: FontSize.Caption, fontWeight: FontWeight.Medium);
+          Text(address, fontWeight: FontWeight.Semibold);
+        }
+        Field("Your name", value: name, placeholder: "How colleagues see you");
+        Field("Password", value: password, type: "password", onEnter: Join, hint: "At least ten characters.");
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Button("Join", onPress: Join, tone: Tone.Primary, size: Size.Lg);
+      }
+    }
+  }
+}
+
+/// The page the confirmation of another address links to.
+[Route("/invite/{key}/{token}/as/{proof}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
+public component InvitationAsPage(InvitationKey key, string token, AddressProof proof) {
+  render { AccountsFrame("You are invited", sub: "Join with the address you confirmed.") { ProvenAddressAnswer(proof, token); } }
+}
 
 /// Send an invitation — an address, one of the roles the app offers (`app.Roles`), and an optional line. With `into`, to
 /// that organisation, the role held there. `onSent` hears each one sent; `canSend` is the app's own answer to "may this
@@ -158,21 +230,24 @@ public component InvitationPage(string token) { render { InvitationScreen(token)
 public component InviteForm(Organization? into = null, Action onSent = null, bool canSend = true) {
   string email = "";
   string note = "";
+  bool anotherAddress = false;
   RoleOption? chosen = null;
   string problem = "";
   string sent = "";
   List<RoleOption> roles = [];
-  on mount { roles = OfferedRoles(); }
+  // Only the roles that may be held where this invitation leads — inside `into`, or across the app.
+  on mount { roles = OfferedRoles(into == null ? RoleScope.App : RoleScope.Organization); }
 
   action Choose(RoleOption c) { chosen = c; }
   action Send() {
     problem = "";
     sent = "";
     try {
-      Invite(email, role: chosen == null ? null : chosen.Role, organization: into, note: note);
+      Invite(email, role: chosen == null ? null : chosen.Role, organization: into, note: note, anotherAddress: anotherAddress);
       sent = $"Invitation sent to {email.Trim().ToLower()}.";
       email = "";
       note = "";
+      anotherAddress = false;
       if (onSent != null) { onSent(); }
     }
     catch (Exception ex) { problem = ex.Message; }
@@ -193,6 +268,11 @@ public component InviteForm(Organization? into = null, Action onSent = null, boo
         }
       }
       Field("A note (optional)", value: note, placeholder: "Quoted in the invitation mail");
+      Stack(gap: 1) {
+        Switch("They may join with another address", value: anotherAddress);
+        Text("Off: only the address above can make the account. On: they may choose another, which is confirmed by a mail to it first.",
+             fontSize: FontSize.Caption, color: Colors.TextMuted);
+      }
       if (problem != "") { Alert(problem, tone: Tone.Danger); }
       if (sent != "") { Alert(sent, tone: Tone.Success); }
       Button("Send invitation", onPress: Send, tone: Tone.Primary, disabled: !canSend);
@@ -210,6 +290,11 @@ public component InvitationList(Organization? into = null, bool canChange = true
   string problem = "";
   on mount { roles = OfferedRoles(); }
 
+  /// Who sent it, as `InviterName` says it — computed here, on the client, from the row the list already holds.
+  string SenderOf(Invitation i) {
+    return PersonName(i.InvitedBy) != "" ? PersonName(i.InvitedBy) : (into != null ? "someone at " + into!.Name : "someone");
+  }
+
   /// A role's name for people, from the roles the app offers — "" for none.
   string NameOf(Invitation i) {
     if (i.Role == null) { return ""; }
@@ -220,14 +305,18 @@ public component InvitationList(Organization? into = null, bool canChange = true
   action Again(Invitation i) { problem = ""; try { ResendInvitation(i); } catch (Exception ex) { problem = ex.Message; } }
   action Withdraw(Invitation i) { problem = ""; try { RevokeInvitation(i); } catch (Exception ex) { problem = ex.Message; } }
 
+  // While the invitations are read: one line's place, where "No invitations waiting." — a claim about them — would be.
+  skeleton {
+    Stack(gap: 0) { Box(py: 2) { Skeleton(shape: SkeletonShape.HalfLine); } }
+  }
   render {
-    Stack(gap: 0, role: UiRole.List, label: "Waiting invitations") {
+    Stack(gap: 0, role: (waiting.Count == 0) ? UiRole.Group : UiRole.List, label: "Waiting invitations") {
       if (waiting.Count == 0) { Text("No invitations waiting.", color: Colors.TextMuted, py: 2); }
       foreach (var i in waiting) {
         Row(gap: 3, align: Align.Center, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: i.Email) {
           Stack(gap: 0, grow: 1, minW: "0") {
             Text(i.Email, fontWeight: FontWeight.Medium);
-            Text((NameOf(i) != "" ? NameOf(i) + " · " : "") + $"invited by {i.InvitedBy.DisplayName}"
+            Text((NameOf(i) != "" ? NameOf(i) + " · " : "") + $"invited by {SenderOf(i)}"
                  + (i.ExpiresAt != null ? $" · lapses {i.ExpiresAt.Value.ToString("d MMM")}" : ""),
                  fontSize: FontSize.Caption, color: Colors.TextMuted);
           }

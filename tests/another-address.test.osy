@@ -1,0 +1,100 @@
+// The invited address is SHOWN, read from the link's key — never typed — and another address is used only when the
+// inviter allowed it at send, and only once a confirmation mailed to it was opened.
+// SECURITY-INVARIANT(invitations-answered-only-by-the-invited-address).
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[TestFixture]
+void AddressDesk() {
+  var sam = new User { Email = "sam@desk.test", DisplayName = "Sam", PasswordHash = Security.HashPassword("correct-horse-1"),
+                       EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = sam, Role = AppRole.Admin };
+}
+
+principal Sam => User.Single(u => u.Email == "sam@desk.test");
+principal NinaHome => User.Single(u => u.Email == "nina.home@elsewhere.test");
+
+/// Sam invites `email` (allowing another address when `other`); answers the mailed link's tail, `key/token`.
+string InvitedWith(string email, bool other) {
+  Invitation? sent = null;
+  runas (Sam) { sent = Invite(email, AppRole.Agent, anotherAddress: other); }
+  Workflow.Settle(sent!);
+  string tail = "";
+  runas (AuthBootstrap) { tail = InvitationTokenFor(email); }
+  return tail;
+}
+
+string KeyOf(string tail) { return tail.Substring(0, tail.IndexOf("/")); }
+
+/// The other address asked for with `key` — so a test can move its run on.
+[AllowAnonymous]
+InvitationAddress AskedWith(InvitationKey key) { return InvitationAddress.Single(a => a.Invitation == key.Row); }
+
+/// The proof in the newest confirmation mail to `to`, or "".
+string ProofMailedTo(string to) {
+  string proof = "";
+  runas (AuthBootstrap) {
+    var mail = OutgoingMail.Where(m => m.To == to && m.Text != null && m.Text.Contains("/as/")).OrderByDescending(m => m.CreatedAt).FirstOrDefault();
+    if (mail != null) {
+      var text = mail.Text ?? "";
+      var at = text.IndexOf("/as/") + "/as/".Length;
+      var end = at;
+      while (end < text.Length && text.Substring(end, 1) != " " && text.Substring(end, 1) != "\n" && text.Substring(end, 1) != ")") { end = end + 1; }
+      proof = text.Substring(at, end - at);
+    }
+  }
+  return proof;
+}
+
+[Test(AddressDesk)]
+void the_links_key_shows_the_invited_address_to_a_newcomer() {
+  var tail = InvitedWith("nina@desk.test", false);
+  var shown = InvitationByKey(InvitationKey.From(KeyOf(tail)));
+  Assert.Equal("nina@desk.test", shown.Email);
+  Assert.True(shown.Open);
+  Assert.False(shown.AnotherAddressAllowed);
+}
+
+[Test(AddressDesk)]
+void without_the_option_no_other_address_is_offered_or_accepted() {
+  var tail = InvitedWith("nina@desk.test", false);
+  Assert.NotEqual("", AskToJoinAs(InvitationKey.From(KeyOf(tail)), tail, "nina.home@elsewhere.test"));
+  Assert.NotEqual("", JoinByInvitation(tail, "nina.home@elsewhere.test", "Nina", "a-long-password-1"));
+  runas (Sam) { Assert.False(User.Any(u => u.Email == "nina.home@elsewhere.test")); }
+}
+
+[Test(AddressDesk)]
+void with_the_option_another_address_joins_once_its_confirmation_is_opened() {
+  var tail = InvitedWith("nina@desk.test", true);
+  var key = InvitationKey.From(KeyOf(tail));
+  Assert.True(InvitationByKey(key).AnotherAddressAllowed);
+  Assert.Equal("", AskToJoinAs(key, tail, " Nina.Home@Elsewhere.test "));
+  Workflow.Settle(AskedWith(key));
+  // The confirmation mailed to it makes the account.
+  var proof = ProofMailedTo("nina.home@elsewhere.test");
+  Assert.NotEqual("", proof);
+  Assert.Equal("nina.home@elsewhere.test", ProvenAddress(AddressProof.From(proof)));
+  Assert.Equal("", JoinByInvitationAs(AddressProof.From(proof), tail, "Nina", "a-long-password-1"));
+  runas (Sam) {
+    var made = User.Single(u => u.Email == "nina.home@elsewhere.test");
+    Assert.NotNull(made.EmailVerifiedAt);
+    Assert.False(User.Any(u => u.Email == "nina@desk.test"));
+    Assert.Equal(InvitationStatus.Accepted, Invitation.Single(i => i.Email == "nina@desk.test").Status);
+  }
+  runas (NinaHome) { Assert.True(RoleGrant.Any(g => g.Member == NinaHome && g.Role == AppRole.Agent)); }
+}
+
+[Test(AddressDesk)]
+void with_the_option_typing_another_address_still_proves_nothing() {
+  var tail = InvitedWith("nina@desk.test", true);
+  var key = InvitationKey.From(KeyOf(tail));
+  Assert.Equal("", AskToJoinAs(key, tail, "nina.home@elsewhere.test"));
+  Workflow.Settle(AskedWith(key));
+  // The token alone, without the proof mailed to the other address, makes no account for it.
+  Assert.NotEqual("", JoinByInvitation(tail, "nina.home@elsewhere.test", "Nina", "a-long-password-1"));
+  runas (Sam) { Assert.False(User.Any(u => u.Email == "nina.home@elsewhere.test")); }
+}

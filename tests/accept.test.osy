@@ -66,6 +66,20 @@ void the_link_makes_no_account_for_any_other_address() {
 }
 
 [Test(Team)]
+void a_refused_answer_does_not_spend_the_link() {
+  // The link answered with what its handler refuses — another address, twice — is still the link: the same one,
+  // answered right, makes the account and accepts. A refusal is the answer not happening, not the link being used.
+  var token = Invited("nina@desk.test", AppRole.Agent);
+  Assert.Contains("another address", JoinByInvitation(token, "mallory@desk.test", "Mallory", "a-long-password-1"));
+  Assert.Contains("another address", JoinByInvitation(token, "eve@desk.test", "Eve", "a-long-password-1"));
+  runas (Sam) { Assert.Equal(InvitationStatus.Pending, Invitation.Single(i => i.Email == "nina@desk.test").Status); }
+  Assert.Equal("", JoinByInvitation(token, "nina@desk.test", "Nina", "a-long-password-1"));
+  runas (Sam) { Assert.Equal(InvitationStatus.Accepted, Invitation.Single(i => i.Email == "nina@desk.test").Status); }
+  // …and having been used, it is spent.
+  Assert.NotEqual("", JoinByInvitation(token, "nina@desk.test", "Nina again", "a-long-password-2"));
+}
+
+[Test(Team)]
 void the_link_works_once() {
   var token = Invited("nina@desk.test", AppRole.Agent);
   Assert.Equal("", JoinByInvitation(token, "nina@desk.test", "Nina", "a-long-password-1"));

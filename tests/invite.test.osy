@@ -119,3 +119,28 @@ void inviting_somebody_who_already_holds_it_says_so() {
   runas (Sam) { Assert.Throws(() => Invite("sam@desk.test", AppRole.Admin)); }
   runas (Sam) { Assert.Throws(() => Invite("not an address", AppRole.Agent)); }
 }
+
+// ── A role is invited to where the app says it may be held (`RoleChoice.HeldIn`): one held only inside an organisation
+//    is never sent as an app-wide role, and an organisation's invitation offers only the roles held there.
+[Test(Desk)]
+void a_role_held_only_inside_an_organisation_is_never_sent_as_an_app_role() {
+  runas (Sam) {
+    var refused = Assert.Throws<ValidationException>(() => Invite("carl@desk.test", AppRole.CustomerAdmin));
+    Assert.Contains("held only inside an organisation", refused.Message);
+    var acme = Company.Single(c => c.Name == "Acme");
+    var sent = Invite("carl@acme.test", AppRole.CustomerAdmin, organization: acme);
+    Assert.Equal(AppRole.CustomerAdmin, sent.Role);
+  }
+}
+
+[Test(Desk)]
+void the_roles_offered_are_the_ones_held_where_the_invitation_leads() {
+  runas (Sam) {
+    var appWide = OfferedRoles(RoleScope.App).Select(o => o.Label).ToList();
+    var inside = OfferedRoles(RoleScope.Organization).Select(o => o.Label).ToList();
+    Assert.False(appWide.Contains("Company admin"));
+    Assert.True(appWide.Contains("Agent"));
+    Assert.True(inside.Contains("Company admin"));
+    Assert.Equal(3, OfferedRoles().Count);
+  }
+}

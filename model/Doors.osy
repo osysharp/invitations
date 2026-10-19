@@ -23,6 +23,29 @@ public class InvitationsSetup {
   /// What kind of account a newcomer's invitation makes — derive and override when the invitation says more than the
   /// address does (`InvitationAccounts`).
   public InvitationAccounts Accounts = new InvitationAccounts();
+  /// What else the app refuses an invitation for, beyond the kit's own checks — derive and override
+  /// (`InvitationRules`). By default nothing more is refused.
+  public InvitationRules Rules = new InvitationRules();
+}
+
+/// The app's own reasons to refuse an invitation, asked by `Invite` after the kit's checks and before anything is saved —
+/// how many people an organisation may hold, which domains may be invited at all. Answer the sentence the inviter reads,
+/// naming what to do instead; "" lets the invitation through:
+///
+///     public class TeamSizeRules : InvitationRules {
+///       public override string Refusal(string email, role? role, Organization? organization) {
+///         if (organization != null && Membership.Count(m => m.Organization == organization && m.IsActive) >= 10) {
+///           return "A team holds ten people — remove somebody first.";
+///         }
+///         return base.Refusal(email, role, organization);
+///       }
+///     }
+///
+/// `email` is the invited address, normalised. A resend asks nothing: it is the same invitation, already let through.
+public class InvitationRules {
+  public virtual string Refusal(string email, role? role, Organization? organization) {
+    return "";
+  }
 }
 
 /// What kind of account a newcomer makes by accepting. By default the app's own sign-up kind (`AccountsSetup.Kinds`);
@@ -47,9 +70,17 @@ public class InvitationAccounts {
 /// Mailed once it is saved; reminded, and lapsing, on `app.Invitations`' cadence. Pressing it twice is one invitation:
 /// an address already waiting on the same invitation gets no second mail (`ResendInvitation` is how to send again).
 /// Throws the sentence to show for something that is not an address, or a person who already holds what it would give.
-public Invitation Invite(string email, role? role = null, Organization? organization = null, string note = "") {
+/// `anotherAddress`: the newcomer may make their account for another address than `email` — proven by a confirmation
+/// mailed to it before the account is made. Off by default: only the invited address answers.
+public Invitation Invite(string email, role? role = null, Organization? organization = null, string note = "", bool anotherAddress = false) {
   var address = NormalisedEmail(email);
   if (!LooksLikeEmail(address)) { throw new ValidationException("That does not look like an email address."); }
+  // A role is invited to where the app says it may be held (`RoleChoice.HeldIn`).
+  if (role != null && IsOfferedRole(role.Value) && !IsOfferedRole(role.Value, organization == null ? RoleScope.App : RoleScope.Organization)) {
+    throw new ValidationException(organization == null
+      ? "That role is held only inside an organisation — invite them to the organisation."
+      : "That role is held across the app, not inside an organisation.");
+  }
   var existing = Invitation.FirstOrDefault(i => i.Email == address && i.Status == InvitationStatus.Pending
     && i.Organization == organization && i.Role == role);
   if (existing != null) { return existing; }
@@ -58,10 +89,13 @@ public Invitation Invite(string email, role? role = null, Organization? organiza
     throw new ValidationException($"{address} already has that — there is nothing to invite them to.");
   }
   var setup = App.Setting<InvitationsSetup>();
+  var refusal = setup.Rules.Refusal(address, role, organization);
+  if (refusal != "") { throw new ValidationException(refusal); }
   var made = new Invitation {
     Email = address, Role = role, Organization = organization, InvitedBy = Session.CurrentUser!,
     Note = note.Trim() == "" ? null : note.Trim(),
     ValidFor = setup.ValidFor, RemindAfter = setup.RemindAfter, RemindEvery = setup.RemindEvery,
+    AnotherAddressAllowed = anotherAddress,
   };
   UnitOfWork.Commit();
   return made;
@@ -107,25 +141,38 @@ public List<Invitation> MyInvitations() {
 /// (so every step of their sign-in, the second factor included, is behind them), and the event admits only the invited
 /// address, proven.
 public void AcceptInvitation(Invitation invitation) {
-  InvitationFlow.RaiseAccept(invitation, null, null, null);
+  InvitationFlow.RaiseAccept(invitation, null, null, null, null);
   UnitOfWork.Commit();
 }
 
 /// The newcomer's door: make an account for the invited address from the mailed link's `token`, and accept. `email`
-/// must be the invited address — the link is for it and nobody else. Answers "" when the account is made (the page then
-/// signs in, as any sign-in: a code, or setting two-step sign-in up, when the app asks for it), or the sentence to show.
+/// must be the invited address — the link is for it and nobody else (the page reads it from the link's key,
+/// `InvitationByKey`, and never asks for it). Answers "" when the account is made (the page then signs in, as any
+/// sign-in: a code, or setting two-step sign-in up, when the app asks for it), or the sentence to show. `token` may be
+/// the link's whole tail (`key/token`).
 ///
 /// ⚑ ANONYMOUS ON PURPOSE: the person has no account yet. What admits them is the link — single-use, stored only as a
 ///   hash, alive only while the invitation waits — and what it can do is make ONE account, for the invited address.
 [AllowAnonymous]
 public string JoinByInvitation(string token, string email, string name, string password) {
+  return JoinWithLink(token, email, name, password, "");
+}
+
+/// The newcomer's door for ANOTHER address, from the confirmation link mailed to it (`AskToJoinAs`): the account is made
+/// for the address `proof` was mailed to, and nothing else.
+[AllowAnonymous]
+public string JoinByInvitationAs(AddressProof proof, string token, string name, string password) {
+  return JoinWithLink(token, proof.Row.Email, name, password, $"{proof}");
+}
+
+string JoinWithLink(string token, string email, string name, string password, string proof) {
   var address = NormalisedEmail(email);
   if (!LooksLikeEmail(address)) { return "That does not look like an email address."; }
   var problem = PasswordProblem(password, address);
   if (problem != "") { return problem; }
-  var answer = new JoinAnswer { Email = address, Name = name.Trim(), PasswordHash = Security.HashPassword(password) };
+  var answer = new JoinAnswer { Email = address, Name = name.Trim(), PasswordHash = Security.HashPassword(password), Proof = proof };
   try {
-    Workflow.Redeem(token.Trim(), JsonSerializer.Serialize(answer));
+    Workflow.Redeem(TokenOf(token.Trim()), JsonSerializer.Serialize(answer));
     return "";
   }
   catch (ValidationException e) { return e.Message; }
@@ -136,13 +183,56 @@ public string JoinByInvitation(string token, string email, string name, string p
 /// The token in a callback address — what the mailed link carries.
 string TokenOf(string callbackUrl) { return callbackUrl.Substring(callbackUrl.LastIndexOf("/") + 1); }
 
-/// The address the invitee opens — the kit's page, holding the link's token.
-public string InvitationLink(string callbackUrl) { return AccountsLink("/invite/" + TokenOf(callbackUrl)); }
+/// The address the invitee opens — the kit's page, holding the invitation's key (which shows the invited address) and
+/// the link's single-use token (which answers it).
+public string InvitationLink(Invitation invitation, string callbackUrl) {
+  return AccountsLink($"/invite/{InvitationKey.For(invitation)}/" + TokenOf(callbackUrl));
+}
+
+/// An invitation as the page a newcomer opens shows it — read from the link's key, so the address is never typed.
+public class InvitedView {
+  /// The invited address.
+  public string Email = "";
+  /// Whether it can still be answered.
+  public bool Open = false;
+  /// Whether the newcomer may join with another address (`Invitation.AnotherAddressAllowed`).
+  public bool AnotherAddressAllowed = false;
+}
+
+/// What the link's `key` invites — for the page a newcomer opens.
+[AllowAnonymous]
+public InvitedView InvitationByKey(InvitationKey key) {
+  var i = key.Row;
+  return new InvitedView { Email = i.Email, Open = i.Status == InvitationStatus.Pending, AnotherAddressAllowed = i.AnotherAddressAllowed };
+}
+
+/// The address a confirmation link was mailed to — proven by holding it.
+[AllowAnonymous]
+public string ProvenAddress(AddressProof proof) { return proof.Row.Email; }
+
+/// Ask to join with another address than the invited one, for an invitation that allows it: a confirmation link is
+/// mailed to `email`, and only that link makes the account (`JoinByInvitationAs`). Answers "" when the mail is on its
+/// way, or the sentence to show.
+[AllowAnonymous]
+public string AskToJoinAs(InvitationKey key, string token, string email) {
+  var invitation = key.Row;
+  if (!invitation.AnotherAddressAllowed) { return "This invitation is for " + invitation.Email + " — it can make an account only for that address."; }
+  if (invitation.Status != InvitationStatus.Pending) { return "This invitation is no longer open — it may have been withdrawn, or it expired."; }
+  var address = NormalisedEmail(email);
+  if (!LooksLikeEmail(address)) { return "That does not look like an email address."; }
+  if (address == invitation.Email) { return "That is the address you were invited at — join with it as it is."; }
+  if (InvitationAddress.Count(a => a.Invitation == invitation) >= 3) {
+    return "Confirmation has been asked for three addresses already — use one of those mails, or ask for a new invitation.";
+  }
+  new InvitationAddress { Invitation = invitation, Email = address, Token = TokenOf(token.Trim()) };
+  UnitOfWork.Commit();
+  return "";
+}
 
 /// Mail `invitation` with the link `callbackUrl` answers — the first time, after a resend, or as a reminder.
 void MailInvitation(Invitation invitation, string callbackUrl, bool reminder) {
   var mails = App.Setting<InvitationsSetup>().Mails;
-  var link = InvitationLink(callbackUrl);
+  var link = InvitationLink(invitation, callbackUrl);
   var mail = reminder ? mails.Reminder(invitation, link) : mails.Invitation(invitation, link);
   SendRendered(invitation.Email, mail, $"invitation-{invitation.Id}-{invitation.Sends}-{invitation.Reminders}");
 }
@@ -153,6 +243,14 @@ public string InvitedInto(Invitation invitation) {
   return AccountsAppName();
 }
 
+/// Who sent `invitation`, in words a person reads — their name, else their address (`PersonName`), else "someone at
+/// Acme": an inviter with neither (a system account) must not leave a blank where a name belongs ("invited by ·",
+/// " invited you to Acme" — the beta, 2026-10-14, for an operator account made without a name).
+public string InviterName(Invitation invitation) {
+  var named = PersonName(invitation.InvitedBy);
+  return named != "" ? named : $"someone at {InvitedInto(invitation)}";
+}
+
 /// The mail an invitation sends, one method per kind. Derive, override, and name it in `app.Invitations`
 /// (`Mails = new MyMails()`) to write your own.
 public class InvitationMails {
@@ -160,15 +258,30 @@ public class InvitationMails {
   public virtual RenderedEmail Invitation(Invitation invitation, string link) { return InvitationMail(invitation, link, false); }
   /// A reminder to an invitee who has not answered yet.
   public virtual RenderedEmail Reminder(Invitation invitation, string link) { return InvitationMail(invitation, link, true); }
+  /// The confirmation mailed to another address a newcomer asked to join with — the link that proves it.
+  public virtual RenderedEmail AddressConfirmation(Invitation invitation, string address, string link) { return AddressConfirmationMail(invitation, address, link); }
+}
+
+[Email]
+public component AddressConfirmationMail(Invitation invitation, string address, string link) {
+  subject => $"Confirm your address to join {InvitedInto(invitation)}";
+  render {
+    EmailLayout(AccountsAppName(), preview: $"Confirm {address} to join {InvitedInto(invitation)}.") {
+      EmailHeading($"Join {InvitedInto(invitation)} as {address}");
+      EmailText($"{InviterName(invitation)} invited {invitation.Email} to join {InvitedInto(invitation)}, and asked for the account to be made for {address} instead. Open the link to confirm this address is yours and make the account.");
+      EmailButton("Confirm and join", link);
+      EmailNote("If you did not ask for this, ignore it — nothing is made until the link is opened.");
+    }
+  }
 }
 
 [Email]
 public component InvitationMail(Invitation invitation, string link, bool reminder) {
   subject => reminder ? $"Reminder: you are invited to {InvitedInto(invitation)}" : $"You are invited to {InvitedInto(invitation)}";
   render {
-    EmailLayout(AccountsAppName(), preview: $"{invitation.InvitedBy.DisplayName} invited you to {InvitedInto(invitation)}.") {
+    EmailLayout(AccountsAppName(), preview: $"{InviterName(invitation)} invited you to {InvitedInto(invitation)}.") {
       EmailHeading(reminder ? "Your invitation is still waiting" : $"Join {InvitedInto(invitation)}");
-      EmailText($"{invitation.InvitedBy.DisplayName} invited {invitation.Email} to join {InvitedInto(invitation)}.");
+      EmailText($"{InviterName(invitation)} invited {invitation.Email} to join {InvitedInto(invitation)}.");
       if (invitation.Note != null) { EmailText($"“{invitation.Note}”"); }
       EmailButton("Accept the invitation", link);
       EmailNote("The link works once, and only for this address. If you already have an account, sign in and accept it there. If you did not expect this, ignore it — nothing happens until you answer.");
