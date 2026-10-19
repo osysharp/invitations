@@ -10,7 +10,7 @@ hold it in — fixed when the invitation is sent. Mailed, reminded, lapsing, rev
 use Osysharp.Identity@0;
 use Osysharp.UserAccounts@1;
 use Osysharp.Organizations@0;
-use Osysharp.Invitations@0;
+use Osysharp.Invitations@1;
 ```
 
 ```osy
