@@ -10,7 +10,7 @@ hold it in — fixed when the invitation is sent. Mailed, reminded, lapsing, rev
 use Osysharp.Identity@0;
 use Osysharp.UserAccounts@1;
 use Osysharp.Organizations@0;
-use Osysharp.Invitations@1;
+use Osysharp.Invitations@2;
 ```
 
 ```osy
@@ -74,6 +74,14 @@ app.Invitations = new InvitationsSetup {
   ValidFor = TimeSpan.FromDays(7), RemindAfter = TimeSpan.FromDays(3), RemindEvery = TimeSpan.FromDays(2),
   Mails = new MyInvitationMails(),    // derive from InvitationMails to write your own
 };
+```
+
+To add one paragraph under the button without rewriting the mail, override only `Postscript`:
+
+```osy
+public class MyInvitationMails : InvitationMails {
+  public override string Postscript(Invitation invitation) { return "Questions? Our community is at https://example.com/community"; }
+}
 ```
 
 An organisation's own admin may be allowed to invite into it, as an ordinary grant:

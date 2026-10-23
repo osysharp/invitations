@@ -67,7 +67,7 @@ public void ResendInvitationById(Guid id) { ResendInvitation(Invitation.Single(x
 /// What the invitee sees at the mailed link: signed out, a choice — make an account for the invited address (with the
 /// link), or sign in to the one they have; signed in, the invitations waiting for their proven address, to accept.
 [Composable]
-public component InvitationAnswer(InvitationKey key, string token) {
+public component InvitationAnswer(InvitationKey invitationKey, string token) {
   live var me = Session.CurrentUser;
   bool newcomer = true;
   // The invited address, read from the link's key on the server — shown, never typed.
@@ -84,7 +84,7 @@ public component InvitationAnswer(InvitationKey key, string token) {
   string accepted = "";
 
   on mount {
-    invited = InvitationByKey(key);
+    invited = InvitationByKey(invitationKey);
     if (Session.CurrentUser != null) { waiting = MyInvitationViews(); }
   }
 
@@ -96,7 +96,7 @@ public component InvitationAnswer(InvitationKey key, string token) {
   action UseAnother() { otherAddress = true; problem = ""; }
   action UseInvited() { otherAddress = false; problem = ""; }
   action AskForOther() {
-    problem = AskToJoinAs(key, token, other);
+    problem = AskToJoinAs(invitationKey, token, other);
     if (problem == "") { asked = other.Trim().ToLower(); }
   }
   action Accept(Guid id) {
@@ -167,7 +167,7 @@ public component InvitationAnswer(InvitationKey key, string token) {
           if (invited!.AnotherAddressAllowed) { Button("Join with another address", onPress: UseAnother, tone: Tone.Ghost, size: Size.Sm); }
         } else if (!newcomer) {
           Text("Sign in, and accept the invitation here.", color: Colors.TextMuted);
-          SignInForm(then: $"/invite/{key}/" + token);
+          SignInForm(then: $"/invite/{invitationKey}/" + token);
         }
       }
     }
@@ -175,13 +175,13 @@ public component InvitationAnswer(InvitationKey key, string token) {
 }
 
 [Composable]
-public component InvitationScreen(InvitationKey key, string token) {
-  render { AccountsFrame("You are invited", sub: "Answer it with the address it was sent to.") { InvitationAnswer(key, token); } }
+public component InvitationScreen(InvitationKey invitationKey, string token) {
+  render { AccountsFrame("You are invited", sub: "Answer it with the address it was sent to.") { InvitationAnswer(invitationKey, token); } }
 }
 
 /// The page the mail links to — anybody may open it; the link (or a full sign-in) is what answers it.
-[Route("/invite/{key}/{token}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
-public component InvitationPage(InvitationKey key, string token) { render { InvitationScreen(key, token); } }
+[Route("/invite/{invitationKey}/{token}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
+public component InvitationPage(InvitationKey invitationKey, string token) { render { InvitationScreen(invitationKey, token); } }
 
 /// What a newcomer sees from the confirmation link mailed to another address: that address, proven, and the account to
 /// make for it.
@@ -218,8 +218,8 @@ public component ProvenAddressAnswer(AddressProof proof, string token) {
 }
 
 /// The page the confirmation of another address links to.
-[Route("/invite/{key}/{token}/as/{proof}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
-public component InvitationAsPage(InvitationKey key, string token, AddressProof proof) {
+[Route("/invite/{invitationKey}/{token}/as/{proof}")] [Title("You are invited")] [AllowAnonymous] [Render(CSR)]
+public component InvitationAsPage(InvitationKey invitationKey, string token, AddressProof proof) {
   render { AccountsFrame("You are invited", sub: "Join with the address you confirmed.") { ProvenAddressAnswer(proof, token); } }
 }
 

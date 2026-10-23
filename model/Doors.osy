@@ -255,9 +255,13 @@ public string InviterName(Invitation invitation) {
 /// (`Mails = new MyMails()`) to write your own.
 public class InvitationMails {
   /// The invitation, with the link that answers it.
-  public virtual RenderedEmail Invitation(Invitation invitation, string link) { return InvitationMail(invitation, link, false); }
+  public virtual RenderedEmail Invitation(Invitation invitation, string link) { return InvitationMail(invitation, link, false, Postscript(invitation)); }
   /// A reminder to an invitee who has not answered yet.
-  public virtual RenderedEmail Reminder(Invitation invitation, string link) { return InvitationMail(invitation, link, true); }
+  public virtual RenderedEmail Reminder(Invitation invitation, string link) { return InvitationMail(invitation, link, true, Postscript(invitation)); }
+  /// A paragraph the invitation and its reminder carry under the button — a welcome, where to ask for help, a link to the
+  /// app's community — or "" for none (the default). A line break in it is kept. Override it to add one line without
+  /// rewriting the mail.
+  public virtual string Postscript(Invitation invitation) { return ""; }
   /// The confirmation mailed to another address a newcomer asked to join with — the link that proves it.
   public virtual RenderedEmail AddressConfirmation(Invitation invitation, string address, string link) { return AddressConfirmationMail(invitation, address, link); }
 }
@@ -276,7 +280,7 @@ public component AddressConfirmationMail(Invitation invitation, string address, 
 }
 
 [Email]
-public component InvitationMail(Invitation invitation, string link, bool reminder) {
+public component InvitationMail(Invitation invitation, string link, bool reminder, string postscript = "") {
   subject => reminder ? $"Reminder: you are invited to {InvitedInto(invitation)}" : $"You are invited to {InvitedInto(invitation)}";
   render {
     EmailLayout(AccountsAppName(), preview: $"{InviterName(invitation)} invited you to {InvitedInto(invitation)}.") {
@@ -284,6 +288,7 @@ public component InvitationMail(Invitation invitation, string link, bool reminde
       EmailText($"{InviterName(invitation)} invited {invitation.Email} to join {InvitedInto(invitation)}.");
       if (invitation.Note != null) { EmailText($"“{invitation.Note}”"); }
       EmailButton("Accept the invitation", link);
+      if (postscript != "") { EmailText(postscript); }
       EmailNote("The link works once, and only for this address. If you already have an account, sign in and accept it there. If you did not expect this, ignore it — nothing happens until you answer.");
     }
   }
