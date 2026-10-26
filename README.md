@@ -91,3 +91,92 @@ partial entity Invitation {
   security { allow read, create, update when IsAuthenticated where Organization != null && HoldsRoleIn(Organization, AppRole.CompanyAdmin); }
 }
 ```
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[Test(Team)]
+void a_newcomer_makes_an_account_for_the_invited_address_through_the_link_and_holds_the_role() {
+  var token = Invited("nina@desk.test", AppRole.Agent);
+  Assert.Equal("", JoinByInvitation(token, "Nina@Desk.test", "Nina Alvarez", "a-long-password-1"));
+  string ticket = "";
+  runas (AuthBootstrap) { ticket = SignIn("nina@desk.test", "a-long-password-1").Ticket; }
+  Assert.NotEqual("", ticket);
+  runas (Nina) {
+    var me = User.Single(u => u.Email == "nina@desk.test");
+    Assert.Equal("Nina Alvarez", me.DisplayName);
+    Assert.NotNull(me.EmailVerifiedAt);
+    Assert.True(RoleGrant.Any(g => g.Member == me && g.Role == AppRole.Agent));
+  }
+  runas (Sam) { Assert.Equal(InvitationStatus.Accepted, Invitation.Single(i => i.Email == "nina@desk.test").Status); }
+}
+```
+
+From [`tests/accept.test.osy`](tests/accept.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[Test(AddressDesk)]
+void the_links_key_shows_the_invited_address_to_a_newcomer() {
+  var tail = InvitedWith("nina@desk.test", false);
+  var shown = InvitationByKey(InvitationKey.From(KeyOf(tail)));
+  Assert.Equal("nina@desk.test", shown.Email);
+  Assert.True(shown.Open);
+  Assert.False(shown.AnotherAddressAllowed);
+}
+```
+
+From [`tests/another-address.test.osy`](tests/another-address.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[Test(Desk)]
+void an_invitation_is_mailed_once_with_its_link_after_it_is_saved() {
+  Invitation? sent = null;
+  runas (Sam) { sent = Invite("  Nina@Desk.TEST ", AppRole.Agent, note: "Welcome aboard"); }
+  Workflow.Settle(sent!);
+  runas (AuthBootstrap) {
+    Assert.Equal(1, InvitationMailsTo("nina@desk.test"));
+    Assert.NotEqual("", InvitationTokenFor("nina@desk.test"));
+  }
+  runas (Sam) {
+    var inv = Invitation.Single(i => i.Email == "nina@desk.test");
+    Assert.Equal(InvitationStatus.Pending, inv.Status);
+    Assert.Equal(1, inv.Sends);
+    Assert.NotNull(inv.ExpiresAt);
+  }
+}
+```
+
+From [`tests/invite.test.osy`](tests/invite.test.osy).
+
+## Learn more
+
+- [The Osysharp.Invitations reference](https://osysharp.com/reference/security/invitations-kit/)
+- [Osysharp.Invitations in the package catalogue](https://osysharp.com/packages/#osysharp-invitations)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
