@@ -204,9 +204,9 @@ workflow InvitationFlow {
       MailInvitation(this.Item, Acceptance.CallbackUrl(), false);
     }
 
-    // Sent again: the state is entered afresh, so the old link dies with its slot, a new one is mailed, and the time it
-    // stays open starts over.
-    on Resend { goto Pending; }
+    // Sent again: the state is entered afresh (`fresh` — a plain self-goto keeps the open slot and its clock), so the
+    // old link dies with its slot, a new one is mailed, and the time it stays open starts over.
+    on Resend { goto Pending fresh; }
 
     on Acceptance(string? email, string? name, string? passwordHash, string? proof) {
       var invitation = this.Item;
@@ -226,7 +226,20 @@ workflow InvitationFlow {
         }
         who = NewInvitedAccount(invitation, address, name ?? "", passwordHash);
       }
-      GrantWhatWasSent(invitation, who!);
+      // The role is the INVITER's to give, as they stand now — not as they stood when they sent it. Someone who has
+      // left since gives nothing.
+      if (!invitation.InvitedBy.IsActive) {
+        throw new ValidationException("This invitation cannot be accepted — the person who sent it is no longer here. Ask for a new one.");
+      }
+      // The APP's own rules hold for what the invitation gives, as on any write
+      // (SECURITY-INVARIANT(an-apps-deny-binds-every-kits-code)) — `deny create where Role == X` on `RoleGrant` or
+      // `MembershipRole`, judged for the INVITER (`GrantWhatWasSent`), who chose it. Refused, nothing of the acceptance
+      // lands (no account is made) and the invitation stays open; the person is told why, at the door they used. (A
+      // security refusal is caught only as `Exception`; this kit's own rules and those it is built on do not bind its run.)
+      try { GrantWhatWasSent(invitation, who!); }
+      catch (Exception e) {
+        throw new ValidationException("This invitation cannot be accepted — this app's own rules refuse what it gives. " + e.Message);
+      }
       invitation.AcceptedBy = who;
       invitation.AcceptedAt = DateTime.UtcNow;
       goto Accepted;
@@ -275,6 +288,13 @@ void MailAddressConfirmation(InvitationAddress asked) {
 }
 
 /// Grant what the invitation was sent with — the app role, or the organisation and the role held in it. Nothing else.
+///
+/// SECURITY-INVARIANT(an-invitations-grant-is-its-inviters): the app's rules on the grant are asked about the person who
+/// SENT the invitation, as they stand when it is accepted — the invitee did not choose the role, and a newcomer is
+/// nobody yet. So "only an Owner makes an Owner" holds on an invitation exactly as on a direct grant: an Owner's
+/// invitation gives it, an Admin's does not, and neither does one whose sender has lost that standing since.
+/// Guarded by tests/inviter-rules.test.osy.
+[JudgedFor(invitation.InvitedBy)]
 void GrantWhatWasSent(Invitation invitation, Principal who) {
   if (invitation.Organization != null) {
     var org = invitation.Organization!;

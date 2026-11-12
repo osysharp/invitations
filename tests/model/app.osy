@@ -35,6 +35,12 @@ entity Company : Organization {
   }
 }
 
+// The app's own rule on who gives its Admin role. It binds an invitation's grant as it binds any write, and is asked
+// about the person who SENT the invitation, as they stand when it is accepted (tests/inviter-rules.test.osy).
+partial entity RoleGrant {
+  security { deny create when !IsAdmin where Role == AppRole.Admin message "Only an admin makes an admin."; }
+}
+
 partial entity Invitation {
   security { allow read, create, update when IsAuthenticated where Organization != null && HoldsRoleIn(Organization, AppRole.CustomerAdmin); }
 }

@@ -1,0 +1,115 @@
+// WHAT AN INVITATION GIVES IS ITS INVITER'S TO GIVE — the app's rules on the grant are asked about the person who sent
+// it, as they stand when it is accepted. The app (tests/model/app.osy) says "only an admin makes an admin".
+// SECURITY-INVARIANT(an-invitations-grant-is-its-inviters).
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+using Osysharp.Mail;
+using Osysharp.Workflow;
+
+[TestFixture]
+void InviterDesk() {
+  // Sam and Rae are admins; Ada has an account with a proven address, and no role.
+  var sam = new User { Email = "sam@desk.test", DisplayName = "Sam", PasswordHash = Security.HashPassword("correct-horse-1"),
+                       EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = sam, Role = AppRole.Admin };
+  var rae = new User { Email = "rae@desk.test", DisplayName = "Rae", PasswordHash = Security.HashPassword("correct-horse-3"),
+                       EmailVerifiedAt = DateTime.UtcNow };
+  new RoleGrant { Member = rae, Role = AppRole.Admin };
+  new User { Email = "ada@desk.test", DisplayName = "Ada", PasswordHash = Security.HashPassword("correct-horse-2"),
+             EmailVerifiedAt = DateTime.UtcNow };
+}
+
+/// Sam invited Ada and Nina to be admins, and the mails went out.
+[TestFixture(InviterDesk)]
+void SamInvitedTwoAdmins() {
+  var sam = User.Single(u => u.Email == "sam@desk.test");
+  var ada = new Invitation { Email = "ada@desk.test", Role = AppRole.Admin, InvitedBy = sam };
+  var nina = new Invitation { Email = "nina@desk.test", Role = AppRole.Admin, InvitedBy = sam };
+  Workflow.Settle(ada);
+  Workflow.Settle(nina);
+}
+
+/// …and then Sam stopped being an admin.
+[TestFixture(SamInvitedTwoAdmins)]
+void SamIsNoLongerAnAdmin() {
+  RoleGrant.Single(g => g.Role == AppRole.Admin && g.Member.Email == "sam@desk.test").Delete();
+}
+
+/// …or Sam's account was switched off.
+[TestFixture(SamInvitedTwoAdmins)]
+void SamWasSwitchedOff() {
+  User.Single(u => u.Email == "sam@desk.test").IsActive = false;
+}
+
+principal Rae => User.Single(u => u.Email == "rae@desk.test");
+principal Ada => User.Single(u => u.Email == "ada@desk.test");
+
+/// How many admins there are — as the sign-in flow reads them (a person sees only their own roles).
+int Admins() {
+  var n = 0;
+  runas (AuthBootstrap) { n = RoleGrant.Count(g => g.Role == AppRole.Admin); }
+  return n;
+}
+
+/// Where the invitation to `email` stands — as Rae, an admin, reads it.
+InvitationStatus StatusOfTheInvitationTo(string email) {
+  var status = InvitationStatus.Pending;
+  runas (Rae) { status = Invitation.Single(i => i.Email == email).Status; }
+  return status;
+}
+
+string LinkTokenFor(string email) {
+  string token = "";
+  runas (AuthBootstrap) { token = InvitationTokenFor(email); }
+  return token;
+}
+
+[Test(SamInvitedTwoAdmins)]
+void an_admins_invitation_makes_an_admin_of_an_account_that_is_not_one() {
+  // Ada, accepting, is not an admin — the rule is asked about Sam, who sent it and is.
+  runas (Ada) { AcceptInvitation(MyInvitations()[0]); }
+  Assert.Equal(3, Admins());
+  Assert.Equal(InvitationStatus.Accepted, StatusOfTheInvitationTo("ada@desk.test"));
+}
+
+[Test(SamInvitedTwoAdmins)]
+void an_admins_invitation_makes_an_admin_of_a_newcomer() {
+  // The mailed link is answered by nobody at all — and the rule is still asked about Sam.
+  Assert.Equal("", JoinByInvitation(LinkTokenFor("nina@desk.test"), "nina@desk.test", "Nina", "a-long-password-1"));
+  Assert.Equal(3, Admins());
+  Assert.Equal(InvitationStatus.Accepted, StatusOfTheInvitationTo("nina@desk.test"));
+}
+
+[Test(SamIsNoLongerAnAdmin)]
+void an_inviter_who_is_no_longer_an_admin_gives_nothing() {
+  // Sam sent it as an admin, and is not one when it is accepted: refused at the door in the rule's own words, the
+  // invitation still open, nothing given.
+  runas (Ada) {
+    var refusal = Assert.Throws(() => AcceptInvitation(MyInvitations()[0]));
+    Assert.Contains("Only an admin makes an admin.", refusal.Message);
+  }
+  Assert.Equal(1, Admins());
+  Assert.Equal(InvitationStatus.Pending, StatusOfTheInvitationTo("ada@desk.test"));
+}
+
+[Test(SamIsNoLongerAnAdmin)]
+void a_newcomer_is_not_made_an_account_by_an_inviter_who_is_no_longer_an_admin() {
+  Assert.Contains("Only an admin makes an admin.",
+    JoinByInvitation(LinkTokenFor("nina@desk.test"), "nina@desk.test", "Nina", "a-long-password-1"));
+  runas (Rae) { Assert.False(User.Any(u => u.Email == "nina@desk.test")); }
+  Assert.Equal(1, Admins());
+  Assert.Equal(InvitationStatus.Pending, StatusOfTheInvitationTo("nina@desk.test"));
+}
+
+[Test(SamWasSwitchedOff)]
+void an_invitation_whose_sender_has_been_switched_off_is_refused_in_plain_words() {
+  runas (Ada) {
+    var refusal = Assert.Throws(() => AcceptInvitation(MyInvitations()[0]));
+    Assert.Contains("the person who sent it is no longer here", refusal.Message);
+  }
+  Assert.Equal(2, Admins());
+  Assert.Equal(InvitationStatus.Pending, StatusOfTheInvitationTo("ada@desk.test"));
+}
