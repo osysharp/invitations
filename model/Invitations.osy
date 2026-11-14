@@ -55,6 +55,10 @@ public entity Invitation {
   /// A line from the inviter, quoted in the mail.
   [MaxLength(1000)] string? Note;
   [Required] Principal InvitedBy;
+  /// Who the platform recorded as sending it — the person whose rights its grant is judged for (`GrantWhatWasSent`).
+  /// No code writes it; for an invitation sent before 2.1.0 the app's migration fills it in from `InvitedBy`, which the
+  /// floor below has always held to the sender.
+  [CreatedBy] Guid? SentBy;
   /// How long it stays open from when it was last sent.
   TimeSpan ValidFor = TimeSpan.FromDays(7);
   /// When to remind an invitee who has not answered, and how often after that (zero: once).
@@ -290,11 +294,12 @@ void MailAddressConfirmation(InvitationAddress asked) {
 /// Grant what the invitation was sent with — the app role, or the organisation and the role held in it. Nothing else.
 ///
 /// SECURITY-INVARIANT(an-invitations-grant-is-its-inviters): the app's rules on the grant are asked about the person who
-/// SENT the invitation, as they stand when it is accepted — the invitee did not choose the role, and a newcomer is
+/// SENT the invitation — whom the platform recorded as making it (`SentBy`), never a value the code wrote —, as they stand
+/// when it is accepted — the invitee did not choose the role, and a newcomer is
 /// nobody yet. So "only an Owner makes an Owner" holds on an invitation exactly as on a direct grant: an Owner's
 /// invitation gives it, an Admin's does not, and neither does one whose sender has lost that standing since.
 /// Guarded by tests/inviter-rules.test.osy.
-[JudgedFor(invitation.InvitedBy)]
+[JudgedFor(invitation.SentBy)]
 void GrantWhatWasSent(Invitation invitation, Principal who) {
   if (invitation.Organization != null) {
     var org = invitation.Organization!;

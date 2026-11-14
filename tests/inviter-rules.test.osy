@@ -26,10 +26,20 @@ void InviterDesk() {
 [TestFixture(InviterDesk)]
 void SamInvitedTwoAdmins() {
   var sam = User.Single(u => u.Email == "sam@desk.test");
-  var ada = new Invitation { Email = "ada@desk.test", Role = AppRole.Admin, InvitedBy = sam };
-  var nina = new Invitation { Email = "nina@desk.test", Role = AppRole.Admin, InvitedBy = sam };
-  Workflow.Settle(ada);
-  Workflow.Settle(nina);
+  // Sent by Sam: the platform records him as the sender (`SentBy`), which is whom the grant is judged for.
+  runas (Sam) {
+    var ada = new Invitation { Email = "ada@desk.test", Role = AppRole.Admin, InvitedBy = sam };
+    var nina = new Invitation { Email = "nina@desk.test", Role = AppRole.Admin, InvitedBy = sam };
+    Workflow.Settle(ada);
+    Workflow.Settle(nina);
+  }
+}
+
+/// An invitation that NAMES Sam as its inviter but that the platform recorded nobody as sending: what every invitation
+/// sent before 2.1.0 is until the app's migration fills `SentBy` in. It is judged for nobody.
+[TestFixture(InviterDesk)]
+void AnInvitationNobodyIsRecordedAsSending() {
+  Workflow.Settle(new Invitation { Email = "ada@desk.test", Role = AppRole.Admin, InvitedBy = User.Single(u => u.Email == "sam@desk.test") });
 }
 
 /// …and then Sam stopped being an admin.
@@ -44,6 +54,7 @@ void SamWasSwitchedOff() {
   User.Single(u => u.Email == "sam@desk.test").IsActive = false;
 }
 
+principal Sam => User.Single(u => u.Email == "sam@desk.test");
 principal Rae => User.Single(u => u.Email == "rae@desk.test");
 principal Ada => User.Single(u => u.Email == "ada@desk.test");
 
@@ -109,6 +120,17 @@ void an_invitation_whose_sender_has_been_switched_off_is_refused_in_plain_words(
   runas (Ada) {
     var refusal = Assert.Throws(() => AcceptInvitation(MyInvitations()[0]));
     Assert.Contains("the person who sent it is no longer here", refusal.Message);
+  }
+  Assert.Equal(2, Admins());
+  Assert.Equal(InvitationStatus.Pending, StatusOfTheInvitationTo("ada@desk.test"));
+}
+
+[Test(AnInvitationNobodyIsRecordedAsSending)]
+void an_invitation_nobody_is_recorded_as_sending_is_judged_for_nobody() {
+  // It names Sam, an admin — but the platform recorded nobody as sending it, and nobody makes an admin.
+  runas (Ada) {
+    var refusal = Assert.Throws(() => AcceptInvitation(MyInvitations()[0]));
+    Assert.Contains("Only an admin makes an admin.", refusal.Message);
   }
   Assert.Equal(2, Admins());
   Assert.Equal(InvitationStatus.Pending, StatusOfTheInvitationTo("ada@desk.test"));
