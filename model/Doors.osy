@@ -120,7 +120,11 @@ public void RevokeInvitation(Invitation invitation) {
   UnitOfWork.Commit();
 }
 
-/// Send a waiting invitation again: a new link (the old one stops working) and its time starts over.
+/// Send a waiting invitation again: a new link (the old one stops working) and its time starts over. Not within a
+/// minute of the last send, and not once it has been sent five times in all (the first send and four more; reminders,
+/// the run's own cadence, are not counted), nor while its address has had all the invitation mail it may get (five an
+/// hour, twenty a day, from every invitation to it) — nobody runs up the invitee's inbox.
+/// Its run refuses it (`InvitationFlow`'s `Resend`), so the limit holds however the event is raised.
 public void ResendInvitation(Invitation invitation) {
   if (invitation.Status != InvitationStatus.Pending) { throw new ValidationException("Only a waiting invitation can be sent again — invite them afresh."); }
   invitation.LastSentBy = Session.CurrentUser;
@@ -168,6 +172,12 @@ public string JoinByInvitationAs(AddressProof proof, string token, string name, 
 string JoinWithLink(string token, string email, string name, string password, string proof) {
   var address = NormalisedEmail(email);
   if (!LooksLikeEmail(address)) { return "That does not look like an email address."; }
+  // SECURITY-INVARIANT(invitations-join-asks-the-link-before-the-password): anybody may call this door, so a link that
+  // admits nobody — made up, spent, withdrawn or lapsed — is refused before the password's rules are asked or its hash
+  // is spent. Guarded by tests/accept.test.osy `a_link_that_admits_nobody_is_refused_before_the_password_is_looked_at`.
+  if (!Security.CallbackIsOpen(token)) {
+    return "This invitation link is not valid any more — it may have been used or withdrawn, or it expired. Ask for a new one.";
+  }
   var problem = PasswordProblem(password, address);
   if (problem != "") { return problem; }
   var answer = new JoinAnswer { Email = address, Name = name.Trim(), PasswordHash = Security.HashPassword(password), Proof = proof };
@@ -229,8 +239,11 @@ public string AskToJoinAs(InvitationKey key, string token, string email) {
   return "";
 }
 
-/// Mail `invitation` with the link `callbackUrl` answers — the first time, after a resend, or as a reminder.
+/// Mail `invitation` with the link `callbackUrl` answers — the first time, after a resend, or as a reminder. Nothing is
+/// mailed while its address has had all the invitation mail it may get (`MayMailAnInvitation`).
 void MailInvitation(Invitation invitation, string callbackUrl, bool reminder) {
+  if (!MayMailAnInvitation(invitation.Email)) { return; }
+  new InvitationMailed { Email = NormalisedEmail(invitation.Email), At = DateTime.UtcNow };
   var mails = App.Setting<InvitationsSetup>().Mails;
   var link = InvitationLink(invitation, callbackUrl);
   var mail = reminder ? mails.Reminder(invitation, link) : mails.Invitation(invitation, link);

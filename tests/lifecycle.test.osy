@@ -92,3 +92,93 @@ void only_somebody_who_may_invite_revokes_or_resends() {
   runas (Mo) { Assert.Throws(() => ResendInvitation(inv!)); }
   Assert.Equal(InvitationStatus.Pending, StatusOf("nina@desk.test"));
 }
+
+/// Sam sends `email`'s waiting invitation again, two minutes after whatever came before, and its mail goes out.
+void ResentTwoMinutesOn(string email) {
+  TestClock.Advance(TimeSpan.FromMinutes(2));
+  Invitation? inv = null;
+  runas (Sam) { inv = Invitation.Single(i => i.Email == email); ResendInvitation(inv!); }
+  Workflow.Settle(inv!);
+}
+
+[Test(Lifecycle)]
+void sending_again_waits_a_minute_and_stops_after_five_sends() {
+  // Nobody runs up a stranger's inbox with the resend button: not again within a minute of the last send, and five
+  // sends in all — the first and four more.
+  var inv = SentTo("nina@desk.test");
+  runas (Sam) {
+    var soon = Assert.Throws<ValidationException>(() => ResendInvitation(Invitation.Single(i => i.Email == "nina@desk.test")));
+    Assert.Contains("less than a minute ago", soon.Message);
+    // …and the event itself, raised without the door, is refused the same.
+    var direct = Assert.Throws<ValidationException>(() => InvitationFlow.RaiseResend(Invitation.Single(i => i.Email == "nina@desk.test")));
+    Assert.Contains("less than a minute ago", direct.Message);
+  }
+  runas (AuthBootstrap) { Assert.Equal(1, InvitationMailsTo("nina@desk.test")); }
+  ResentTwoMinutesOn("nina@desk.test");
+  ResentTwoMinutesOn("nina@desk.test");
+  ResentTwoMinutesOn("nina@desk.test");
+  ResentTwoMinutesOn("nina@desk.test");
+  runas (Sam) { Assert.Equal(5, Invitation.Single(i => i.Email == "nina@desk.test").Sends); }
+  TestClock.Advance(TimeSpan.FromMinutes(2));
+  runas (Sam) {
+    var sixth = Assert.Throws<ValidationException>(() => ResendInvitation(Invitation.Single(i => i.Email == "nina@desk.test")));
+    Assert.Contains("five times", sixth.Message);
+  }
+  Workflow.Settle(inv);
+  runas (AuthBootstrap) { Assert.Equal(5, InvitationMailsTo("nina@desk.test")); }
+}
+
+/// Sam invites `email` and, two minutes on, withdraws it — an invitation as cheap as a resend.
+void InvitedThenRevoked(string email) {
+  var inv = SentTo(email);
+  runas (Sam) { RevokeInvitation(inv); }
+  TestClock.Advance(TimeSpan.FromMinutes(2));
+}
+
+[Test(Lifecycle)]
+void an_address_is_mailed_five_invitations_an_hour_and_twenty_a_day_however_they_are_sent() {
+  // Inviting, revoking and inviting again — or writing invitations straight in — draws on one budget per ADDRESS, so
+  // nobody who may invite fills a stranger's inbox: five mails an hour and twenty a day, from every invitation to it.
+  for (var i = 0; i < 6; i++) { InvitedThenRevoked("nina@desk.test"); }
+  runas (AuthBootstrap) { Assert.Equal(5, InvitationMailsTo("nina@desk.test")); }
+  // A row written straight in is mailed by the same run, held to the same budget.
+  Invitation? direct = null;
+  runas (Sam) {
+    direct = new Invitation { Email = "nina@desk.test", Role = AppRole.Agent, InvitedBy = Session.CurrentUser! };
+    UnitOfWork.Commit();
+  }
+  Workflow.Settle(direct!);
+  runas (AuthBootstrap) { Assert.Equal(5, InvitationMailsTo("nina@desk.test")); }
+  // …however the address is spelt: the same inbox under another case is the same budget.
+  foreach (var spelling in new List<string> { "NINA@desk.test", "Nina@Desk.Test" }) {
+    Invitation? respelt = null;
+    runas (Sam) {
+      respelt = new Invitation { Email = spelling, Role = AppRole.Agent, InvitedBy = Session.CurrentUser! };
+      UnitOfWork.Commit();
+    }
+    Workflow.Settle(respelt!);
+    runas (Sam) { RevokeInvitation(respelt!); }
+  }
+  runas (AuthBootstrap) {
+    Assert.Equal(5, InvitationMailsTo("nina@desk.test") + InvitationMailsTo("NINA@desk.test") + InvitationMailsTo("Nina@Desk.Test"));
+  }
+  // …and sending it again is refused while the address has had its five, leaving the link it holds alive.
+  TestClock.Advance(TimeSpan.FromMinutes(2));
+  runas (Sam) {
+    var again = Assert.Throws<ValidationException>(() => ResendInvitation(direct!));
+    Assert.Contains("as many invitations as it may get", again.Message);
+  }
+  runas (Sam) { RevokeInvitation(direct!); }
+  // Three hours more of five an hour reach the day's twenty; the next hour mails nothing.
+  for (var h = 0; h < 3; h++) {
+    TestClock.Advance(TimeSpan.FromHours(1));
+    for (var i = 0; i < 5; i++) { InvitedThenRevoked("nina@desk.test"); }
+  }
+  runas (AuthBootstrap) { Assert.Equal(20, InvitationMailsTo("nina@desk.test")); }
+  TestClock.Advance(TimeSpan.FromHours(1));
+  InvitedThenRevoked("nina@desk.test");
+  runas (AuthBootstrap) { Assert.Equal(20, InvitationMailsTo("nina@desk.test")); }
+  // Another address has its own budget.
+  SentTo("mira@desk.test");
+  runas (AuthBootstrap) { Assert.Equal(1, InvitationMailsTo("mira@desk.test")); }
+}

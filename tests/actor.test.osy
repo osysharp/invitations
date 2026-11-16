@@ -1,0 +1,41 @@
+// The invitation's run writes as its own actor, `InvitationRun`, which holds what the flow writes and nothing more
+// — it mails the invited address, makes the newcomer's account, gives the role or the membership the
+// invitation was sent with. Anything else is refused it.
+
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+
+[TestFixture]
+void ActorDesk() { }
+
+// An invitation never makes an organisation: that is the app's managers' (`ManagesOrganizations`), and the run holds none.
+[Test(ActorDesk)]
+void the_invitation_run_may_not_make_an_organisation() {
+  runas (InvitationRun) { Assert.Denied(() => { new Organization { Name = "Rogue" }; UnitOfWork.Commit(); }); }
+  Assert.Equal(0, Organization.Count(o => o.Name == "Rogue"));
+}
+
+[TestFixture]
+void Held() {
+  var ada = new User { Email = "ada@desk.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  var acme = new Organization { Name = "Acme" };
+  var m = new Membership { Organization = acme, Member = ada };
+  new MembershipRole { Membership = m, Role = AppRole.CustomerAdmin };
+}
+
+// What the run gives it never takes away: a role, a membership or a role held in one is a manager's to take
+// (`Osysharp.Identity.RevokesRoles`, `Osysharp.Organizations.RemovesMemberships`), and the run holds neither.
+[Test(Held)]
+void the_invitation_run_may_not_take_a_role_or_a_membership_away() {
+  runas (InvitationRun) { Assert.Denied(() => { RoleGrant.Single(g => g.Role == AppRole.Agent).Delete(); UnitOfWork.Commit(); }); }
+  runas (InvitationRun) { Assert.Denied(() => { MembershipRole.Single(g => g.Role == AppRole.CustomerAdmin).Delete(); UnitOfWork.Commit(); }); }
+  runas (InvitationRun) { Assert.Denied(() => { Membership.Single(x => x.Organization.Name == "Acme").Delete(); UnitOfWork.Commit(); }); }
+  runas (InvitationRun) {
+    Assert.Equal(1, RoleGrant.Count(g => g.Role == AppRole.Agent));
+    Assert.Equal(1, MembershipRole.Count());
+    Assert.Equal(1, Membership.Count());
+  }
+}

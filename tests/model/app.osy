@@ -28,10 +28,15 @@ public class AdminsUseCodes : SecondFactorPolicy {
 }
 
 /// A customer company — its own admin invites its people into it, and nowhere else.
+///
+/// The app's own read rules on its own kind of organisation bind every reader — the invitation's run too, which writes
+/// as its own actor (`InvitationRun`) and must read the company it makes a membership in. So the app says so, by name:
+/// a subtype the app declares is the app's to open, and no kit can open it for itself.
 entity Company : Organization {
   security {
     allow read, create, update when IsAdmin;
     allow read when IsOrganizationMember where IsMemberOf(this);
+    allow read when user == Actor.Of<InvitationRun>();
   }
 }
 

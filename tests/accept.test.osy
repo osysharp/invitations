@@ -167,3 +167,16 @@ void an_invitation_into_a_company_makes_a_membership_with_the_role_held_there() 
     Assert.False(RoleGrant.Any(g => g.Member == Ada && g.Role == AppRole.CustomerAdmin));
   }
 }
+
+[Test(Team)]
+void a_link_that_admits_nobody_is_refused_before_the_password_is_looked_at() {
+  // The door is open to anybody, so what it does for a link that admits nobody must be nothing: the link is asked
+  // first, and the password — its rules, and the hash it costs — only for a link that is still open.
+  var token = Invited("nina@desk.test", AppRole.Agent);
+  Assert.Contains("not valid", JoinByInvitation("a-link-nobody-was-sent", "nina@desk.test", "Nina", "short"));
+  // The open link, with the same password: now the password is what is refused.
+  Assert.Contains("at least", JoinByInvitation(token, "nina@desk.test", "Nina", "short"));
+  Assert.Equal("", JoinByInvitation(token, "nina@desk.test", "Nina", "a-long-password-1"));
+  // Spent, it admits nobody again — and is refused before the password is.
+  Assert.Contains("not valid", JoinByInvitation(token, "nina@desk.test", "Nina", "short"));
+}

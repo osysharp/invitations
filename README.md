@@ -45,6 +45,16 @@ InvitationList(canChange: MayInvite);
 From code: `Invite("ada@acme.com", AppRole.Agent)`, `Invite(email, AppRole.CompanyAdmin, organization: acme)`,
 `RevokeInvitation(inv)`, `ResendInvitation(inv)`.
 
+Sending again is held back so nobody runs up the invitee's inbox: `ResendInvitation` refuses within a minute of the
+last send, and an invitation is sent **five times at most** — the first send and four more (the run's reminders are not
+counted). Past that, revoke it and invite afresh.
+
+An **address** is mailed at most **five invitation mails an hour and twenty a day**, counted over every invitation to it —
+whoever sent them, however each was made (`Invite`, a row written straight in, a resend, a reminder, the confirmation
+of another address). The runs check it as they send, so inviting, revoking and inviting again fills nobody's inbox. Past
+it nothing is mailed: the invitation stays open (an invitee who is signed in with that address proven still sees it in the
+app), and `ResendInvitation` refuses until the address has room again.
+
 ## Who answers it
 
 **Only the address it was sent to**, through one of two doors:
@@ -126,6 +136,21 @@ From [`tests/accept.test.osy`](tests/accept.test.osy).
 ```osy
 using Osysharp.Identity;
 using Osysharp.UserAccounts;
+using Osysharp.Organizations;
+using Osysharp.Invitations;
+
+[Test(ActorDesk)]
+void the_invitation_run_may_not_make_an_organisation() {
+  runas (InvitationRun) { Assert.Denied(() => { new Organization { Name = "Rogue" }; UnitOfWork.Commit(); }); }
+  Assert.Equal(0, Organization.Count(o => o.Name == "Rogue"));
+}
+```
+
+From [`tests/actor.test.osy`](tests/actor.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.UserAccounts;
 using Osysharp.Invitations;
 using Osysharp.Mail;
 using Osysharp.Workflow;
@@ -141,34 +166,6 @@ void the_links_key_shows_the_invited_address_to_a_newcomer() {
 ```
 
 From [`tests/another-address.test.osy`](tests/another-address.test.osy).
-
-```osy
-using Osysharp.Identity;
-using Osysharp.UserAccounts;
-using Osysharp.Organizations;
-using Osysharp.Invitations;
-using Osysharp.Mail;
-using Osysharp.Workflow;
-
-[Test(Desk)]
-void an_invitation_is_mailed_once_with_its_link_after_it_is_saved() {
-  Invitation? sent = null;
-  runas (Sam) { sent = Invite("  Nina@Desk.TEST ", AppRole.Agent, note: "Welcome aboard"); }
-  Workflow.Settle(sent!);
-  runas (AuthBootstrap) {
-    Assert.Equal(1, InvitationMailsTo("nina@desk.test"));
-    Assert.NotEqual("", InvitationTokenFor("nina@desk.test"));
-  }
-  runas (Sam) {
-    var inv = Invitation.Single(i => i.Email == "nina@desk.test");
-    Assert.Equal(InvitationStatus.Pending, inv.Status);
-    Assert.Equal(1, inv.Sends);
-    Assert.NotNull(inv.ExpiresAt);
-  }
-}
-```
-
-From [`tests/invite.test.osy`](tests/invite.test.osy).
 
 ## Learn more
 

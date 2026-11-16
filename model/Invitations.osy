@@ -104,6 +104,21 @@ public entity Invitation {
     deny update ExpiresAt;
     deny update AcceptedBy;
     deny update AcceptedAt;
+    // …by its run, which writes as its own actor: the run's record, and nothing an inviter fixed.
+    allow read when user == Actor.Of<InvitationRun>();
+    allow update SentAt, Sends, Reminders, ExpiresAt, AcceptedBy, AcceptedAt when user == Actor.Of<InvitationRun>();
+  }
+}
+
+/// One mail an invitation sent to an address — its first send, a resend, a reminder, or the confirmation mailed to another
+/// address a newcomer asked to join with. What `MayMailAnInvitation` counts; written by the runs alone, read by nobody else.
+public entity InvitationMailed {
+  /// The address, normalised (`NormalisedEmail`) — one budget per inbox, however an invitation spelt it.
+  [Required, MaxLength(255)] string Email;
+  DateTime At;
+
+  security {
+    allow read, create when user == Actor.Of<InvitationRun>();
   }
 }
 
@@ -133,6 +148,7 @@ public entity InvitationAddress {
   [CreatedAt] DateTime? CreatedAt;
   [Required] Invitation Invitation;
   /// The other address — normalised.
+  /// The address, normalised (`NormalisedEmail`) — one budget per inbox, however an invitation spelt it.
   [Required, MaxLength(255)] string Email;
   /// The invitation's single-use token the newcomer holds — carried on into the confirmation link, which needs it to
   /// accept. The holder of the invitation's key already has it.
@@ -165,10 +181,31 @@ workflow InvitationAddressFlow {
   terminal success Mailed { }
 }
 
+/// Who an invitation's run writes as. It does what its inviter may not do directly — mails the invited address, makes
+/// the newcomer's account, gives the role (or the organisation and the role there) the invitation was sent with — and
+/// holds exactly that: the four questions below, which the kits it is built on ask, answered for it alone.
+[Actor]
+public class InvitationRun {
+  public static User Principal => new User { Email = "invitation-run@actors.osyrin.invalid", DisplayName = "Invitations" };
+}
+
+policy SendsAppMail += user == Actor.Of<InvitationRun>();
+// An account is a `Principal` (Osysharp.Identity) and a `User` (Osysharp.UserAccounts): each kit asks.
+policy Osysharp.Identity.MakesAccounts += user == Actor.Of<InvitationRun>();
+policy Osysharp.UserAccounts.MakesAccounts += user == Actor.Of<InvitationRun>();
+policy GrantsRoles += user == Actor.Of<InvitationRun>();
+policy ManagesMemberships += user == Actor.Of<InvitationRun>();
+
 workflow InvitationFlow {
   Tracks    = Invitation.Status;
   Autostart = true;
   Initial   = Pending;
+  // ⚑ ITS OWN ACTOR, ACTING FOR NOBODY. The inviter is asked when they send it (`MayInvite`, the floor above), the
+  //   invitee at `Accept` (`[Authorize]`, `Candidates`, or the mailed link's token); what the inviter chose keeps its
+  //   judgement for them (`GrantWhatWasSent`, `[JudgedFor(invitation.SentBy)]`). The run itself does what neither of
+  //   them may — so it does not act for the person who started it.
+  RunsAs    = InvitationRun;
+  ActsFor   = Nobody;
 
   /// Accepted. Raised by the invitee in the app — signed in, with the invited address proven — or answered over the
   /// mailed link by a newcomer, which carries no principal at all (the link is the permission, and it can only make an
@@ -210,7 +247,26 @@ workflow InvitationFlow {
 
     // Sent again: the state is entered afresh (`fresh` — a plain self-goto keeps the open slot and its clock), so the
     // old link dies with its slot, a new one is mailed, and the time it stays open starts over.
-    on Resend { goto Pending fresh; }
+    //
+    // SECURITY-INVARIANT(invitations-resend-is-throttled): sending again is refused within a minute of the last send,
+    // once the invitation has been sent five times, and while its address has had all the invitation mail it may get
+    // (`MayMailAnInvitation`) — here, on the event, so it holds for `ResendInvitation` and for the event raised any other
+    // way, and read from the runs' own records (`SentAt`, `Sends`, `InvitationMailed`), which no person may write.
+    // Guarded by tests/lifecycle.test.osy `sending_again_waits_a_minute_and_stops_after_five_sends` and
+    // `an_address_is_mailed_five_invitations_an_hour_and_twenty_a_day_however_they_are_sent`.
+    on Resend {
+      var last = this.Item.SentAt;
+      if (last != null && last > DateTime.UtcNow - TimeSpan.FromMinutes(1)) {
+        throw new ValidationException("It was sent less than a minute ago — wait a minute before sending it again.");
+      }
+      if (this.Item.Sends >= 5) {
+        throw new ValidationException("This invitation has been sent five times already — revoke it, and invite them afresh if they still need it.");
+      }
+      if (!MayMailAnInvitation(this.Item.Email)) {
+        throw new ValidationException("That address has been sent as many invitations as it may get for now — send it again later.");
+      }
+      goto Pending fresh;
+    }
 
     on Acceptance(string? email, string? name, string? passwordHash, string? proof) {
       var invitation = this.Item;
@@ -287,6 +343,8 @@ bool ProvesAddress(Invitation invitation, string address, string? proof) {
 void MailAddressConfirmation(InvitationAddress asked) {
   var invitation = asked.Invitation;
   var link = AccountsLink($"/invite/{InvitationKey.For(invitation)}/{asked.Token}/as/{AddressProof.For(asked)}");
+  if (!MayMailAnInvitation(asked.Email)) { return; }
+  new InvitationMailed { Email = NormalisedEmail(asked.Email), At = DateTime.UtcNow };
   var mail = App.Setting<InvitationsSetup>().Mails.AddressConfirmation(invitation, asked.Email, link);
   SendRendered(asked.Email, mail, $"invitation-address-{asked.Id}");
 }
@@ -312,4 +370,24 @@ void GrantWhatWasSent(Invitation invitation, Principal who) {
     // The app is told in the acceptance's own write — an invited agent is put on the desk's queues as they arrive.
     App.Setting<RolesSetup>().Events.Granted(who, invitation.Role.Value);
   }
+}
+
+/// May another invitation mail go to `address`? Not past five in the last hour or twenty in the last day — counted over
+/// EVERY invitation to it, whoever sent them and however each was made (`Invite`, a row written directly, a resend, a
+/// reminder, a confirmation of another address), and however the address is spelt: it is counted normalised
+/// (`NormalisedEmail`), since a row written straight in keeps whatever case its writer gave it. Past it, the run mails
+/// nothing; the invitation itself stays as it is.
+///
+/// SECURITY-INVARIANT(invitations-mail-to-an-address-is-rate-limited): an address is mailed at most five invitation mails
+/// an hour and twenty a day, from all invitations together — checked by the runs at every send, so inviting, revoking
+/// and inviting again, or writing invitations straight in, fills nobody's inbox. Guarded by tests/lifecycle.test.osy
+/// `an_address_is_mailed_five_invitations_an_hour_and_twenty_a_day_however_they_are_sent`.
+bool MayMailAnInvitation(string to) {
+  var address = NormalisedEmail(to);
+  var now = DateTime.UtcNow;
+  var anHourAgo = now - TimeSpan.FromHours(1);
+  var aDayAgo = now - TimeSpan.FromDays(1);
+  if (InvitationMailed.Count(m => m.Email == address && m.At > anHourAgo) >= 5) { return false; }
+  if (InvitationMailed.Count(m => m.Email == address && m.At > aDayAgo) >= 20) { return false; }
+  return true;
 }
