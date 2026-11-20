@@ -225,9 +225,11 @@ public component InvitationAsPage(InvitationKey invitationKey, string token, Add
 
 /// Send an invitation — an address, one of the roles the app offers (`app.Roles`), and an optional line. With `into`, to
 /// that organisation, the role held there. `onSent` hears each one sent; `canSend` is the app's own answer to "may this
-/// person invite?" (`canSend: MayInvite`) — the send is refused by the kit's rules either way.
+/// person invite?" (`canSend: MayInvite`) — the send is refused by the kit's rules either way. `offer`, when given, keeps
+/// only the roles of those labels: the app's own answer to "which roles may this person give?" (an organisation's people
+/// lead is offered no Admin); the kit's rules refuse the others either way.
 [Composable]
-public component InviteForm(Organization? into = null, Action onSent = null, bool canSend = true) {
+public component InviteForm(Organization? into = null, Action onSent = null, bool canSend = true, List<string>? offer = null) {
   string email = "";
   string note = "";
   bool anotherAddress = false;
@@ -236,7 +238,7 @@ public component InviteForm(Organization? into = null, Action onSent = null, boo
   string sent = "";
   List<RoleOption> roles = [];
   // Only the roles that may be held where this invitation leads — inside `into`, or across the app.
-  on mount { roles = OfferedRoles(into == null ? RoleScope.App : RoleScope.Organization); }
+  on mount { roles = OfferedRoles(into == null ? RoleScope.App : RoleScope.Organization).Where(c => offer == null || offer.Contains(c.Label)).ToList(); }
 
   action Choose(RoleOption c) { chosen = c; }
   action Send() {

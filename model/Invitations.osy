@@ -212,7 +212,14 @@ workflow InvitationFlow {
   /// account for the invited address).
   [Authorize(u => u.Email == this.Item.Email && u.EmailVerifiedAt != null)]
   event Accept(string? email, string? name, string? passwordHash, string? proof);
+  /// Withdrawn. Raised by whoever may invite (`MayInvite`), or by whoever the invitation records as withdrawing it —
+  /// `RevokeInvitation` writes `RevokedBy` first, and only someone the app lets change the invitation (an organisation's
+  /// own admin, by a grant on `Invitation`) may write it. Never the invitee, never the run itself.
+  [Authorize(u => MayInvite || u == this.Item.RevokedBy)]
   event Revoke();
+  /// Sent again. Raised by whoever may invite, or by whoever the invitation records as sending it again —
+  /// `ResendInvitation` writes `LastSentBy` first, under the same right to change the invitation.
+  [Authorize(u => MayInvite || u == this.Item.LastSentBy)]
   event Resend();
 
   on Revoke { goto Revoked; }

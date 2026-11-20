@@ -14,7 +14,7 @@ using Osysharp.EmailTemplates;
 public class InvitationsSetup {
   /// How long an invitation stays open from when it was last sent. An organisation's security policy may set it for
   /// every app it runs.
-  [OrgPolicy(OrgPolicyMode.Lock)] public TimeSpan ValidFor = TimeSpan.FromDays(7);
+  [OrgPolicy(OrgPolicyMode.Lock, Name = "How long an invitation stays open")] public TimeSpan ValidFor = TimeSpan.FromDays(7);
   /// When an invitee who has not answered is reminded, and how often after that (zero: once).
   public TimeSpan RemindAfter = TimeSpan.FromDays(3);
   public TimeSpan RemindEvery = TimeSpan.FromDays(2);
