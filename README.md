@@ -8,7 +8,7 @@ hold it in — fixed when the invitation is sent. Mailed, reminded, lapsing, rev
 ```osy
 // app.osy
 use Osysharp.Identity@0;
-use Osysharp.UserAccounts@1;
+use Osysharp.UserAccounts@2;
 use Osysharp.Organizations@0;
 use Osysharp.Invitations@2;
 ```
@@ -83,8 +83,21 @@ app), and `ResendInvitation` refuses until the address has room again.
 app.Invitations = new InvitationsSetup {
   ValidFor = TimeSpan.FromDays(7), RemindAfter = TimeSpan.FromDays(3), RemindEvery = TimeSpan.FromDays(2),
   Mails = new MyInvitationMails(),    // derive from InvitationMails to write your own
+  Events = new MyInvitationEvents(),  // derive from InvitationEvents to give more when one is accepted
 };
 ```
+
+`InvitationEvents.Accepted(invitation, person)` is told last, inside the acceptance's write, after what the invitation
+gives is given — and judged for the person who SENT it, as the grant is: another package's rule that refuses the sender
+refuses the acceptance, and nothing lands. Your code there runs as the system, with your app's own denies off: nobody is
+signed in to it, and your app's rules on your own rows do not bind what it writes (another package's do, as at any kit's
+seam: `AppCodeAtAKitActorsSeamRunsAsBeforeTests`). So decide only from what the sender fixed: the invitation's fields
+nobody changes once it is sent (`Email`, `Role`, `Organization`, `SentBy`) and rows stamped `[CreatedBy]` whose stamp is
+`invitation.SentBy`, asked again of that person as they stand now. Never decide from a field somebody else may still
+edit, such as `Note`. Throw to refuse the acceptance; the person reads why.
+
+`Invite(…, saveNow: false)` leaves the invitation unsaved, so an app can save rows that travel with it in the same commit:
+nothing is mailed until that commit, and a refused commit leaves no invitation.
 
 To add one paragraph under the button without rewriting the mail, override only `Postscript`:
 

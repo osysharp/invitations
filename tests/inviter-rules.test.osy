@@ -125,6 +125,77 @@ void an_invitation_whose_sender_has_been_switched_off_is_refused_in_plain_words(
   Assert.Equal(InvitationStatus.Pending, StatusOfTheInvitationTo("ada@desk.test"));
 }
 
+/// Sam invited Ada into the Acme company, and asked that she be seated there as an agent too (a `SeatAsAgent` row he
+/// made; the app's `DeskInvitationEvents`).
+[TestFixture(InviterDesk)]
+void SamInvitedAdaIntoAcme() {
+  var sam = User.Single(u => u.Email == "sam@desk.test");
+  var acme = new Company { Name = "Acme" };
+  runas (Sam) {
+    var sent = new Invitation { Email = "ada@desk.test", Organization = acme, InvitedBy = sam };
+    new SeatAsAgent { Invitation = sent };
+    Workflow.Settle(sent);
+  }
+}
+
+/// Sam invited Ada into Acme and asked for no seat; Rae, another admin, asked for one on Sam's invitation afterwards.
+[TestFixture(InviterDesk)]
+void RaeAskedASeatOnSamsInvitation() {
+  var sam = User.Single(u => u.Email == "sam@desk.test");
+  var acme = new Company { Name = "Acme" };
+  Invitation? sent = null;
+  runas (Sam) {
+    sent = new Invitation { Email = "ada@desk.test", Organization = acme, InvitedBy = sam, Note = "Seat them as an agent." };
+    Workflow.Settle(sent!);
+  }
+  runas (Rae) {
+    new SeatAsAgent { Invitation = Invitation.Single(i => i.Email == "ada@desk.test") };
+    UnitOfWork.Commit();
+  }
+}
+
+[Test(SamInvitedAdaIntoAcme)]
+void the_accepted_event_acts_for_the_sender() {
+  // Ada accepts, signed in. The app's `Accepted` is called inside the kit's grant for the SENDER, so it acts for Sam: the
+  // row it makes is made for Sam, and `Security.AskedById` reads Sam there. Not Ada, who accepted, and not nobody.
+  runas (Ada) { AcceptInvitation(MyInvitations()[0]); }
+  runas (Sam) {
+    var sam = User.Single(u => u.Email == "sam@desk.test").Id;
+    var seen = AcceptanceSeen.Single(s => s.Invitation.Email == "ada@desk.test");
+    Assert.Equal("for=Sam reads=Sam", "for=" + WhoIs(seen.MadeFor, sam) + " reads=" + WhoIs(seen.ActedFor, sam));
+  }
+}
+
+string WhoIs(Guid? id, Guid sam) {
+  if (id == null) { return "nobody"; }
+  if (id == sam) { return "Sam"; }
+  return User.Any(u => u.Id == id && u.Email == "ada@desk.test") ? "Ada" : "someone else";
+}
+
+[Test(SamInvitedAdaIntoAcme)]
+void a_seat_the_sender_asked_is_given() {
+  // Ada accepts, signed in. Sam asked for her seat (his `SeatAsAgent` row), so the app's `Accepted` seats her as an agent
+  // in Acme through the Organizations kit.
+  runas (Ada) { AcceptInvitation(MyInvitations()[0]); }
+  Assert.Equal(InvitationStatus.Accepted, StatusOfTheInvitationTo("ada@desk.test"));
+  runas (Sam) {
+    Assert.True(MembershipRole.Any(r => r.Membership.Member.Email == "ada@desk.test" && r.Membership.Organization.Name == "Acme"
+      && r.Role == AppRole.Agent));
+  }
+}
+
+[Test(RaeAskedASeatOnSamsInvitation)]
+void a_seat_the_sender_did_not_ask_is_not_given() {
+  // The override decides only from what the SENDER fixed: Rae's ask is stamped as Rae's, and the note says what anyone may
+  // edit it to. Ada joins Acme, as Sam's invitation says, and is seated as nothing.
+  runas (Ada) { AcceptInvitation(MyInvitations()[0]); }
+  Assert.Equal(InvitationStatus.Accepted, StatusOfTheInvitationTo("ada@desk.test"));
+  runas (Sam) {
+    Assert.True(Membership.Any(m => m.Member.Email == "ada@desk.test" && m.Organization.Name == "Acme"));
+    Assert.False(MembershipRole.Any(r => r.Membership.Member.Email == "ada@desk.test" && r.Role == AppRole.Agent));
+  }
+}
+
 [Test(AnInvitationNobodyIsRecordedAsSending)]
 void an_invitation_nobody_is_recorded_as_sending_is_judged_for_nobody() {
   // It names Sam, an admin — but the platform recorded nobody as sending it, and nobody makes an admin.

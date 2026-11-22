@@ -49,3 +49,39 @@ partial entity RoleGrant {
 partial entity Invitation {
   security { allow read, create, update when IsAuthenticated where Organization != null && HoldsRoleIn(Organization, AppRole.CustomerAdmin); }
 }
+
+/// What the desk does when an invitation is accepted (tests/inviter-rules.test.osy): an invitation into a company whose
+/// SENDER asked for it seats the person there as an agent too, through the Organizations kit. The override runs as the
+/// system with this app's own denies off, so it decides only from what the sender fixed: a `SeatAsAgent` row the platform
+/// stamped as made by the invitation's `SentBy`. A row anyone else made, or an edited `Note`, seats nobody. It also notes
+/// whom it acts for (`AcceptanceSeen`).
+public class DeskInvitationEvents : InvitationEvents {
+  public override void Accepted(Invitation invitation, Principal person) {
+    new AcceptanceSeen { Invitation = invitation, ActedFor = Security.AskedById };
+    var sender = invitation.SentBy;
+    var invitationId = invitation.Id;
+    if (invitation.Organization != null && sender != null
+        && SeatAsAgent.Any(s => s.Invitation.Id == invitationId && s.AskedBy == sender)) {
+      GrantIn(invitation.Organization!, person, AppRole.Agent);
+    }
+  }
+}
+
+/// The sender's ask that the person they invite is seated as an agent too. Whoever made it is stamped by the platform
+/// (`AskedBy`), never written, so the override can tell the sender's ask from anybody else's.
+public entity SeatAsAgent {
+  [Required, Immutable] Invitation Invitation;
+  [CreatedBy] Guid? AskedBy;
+  security { allow read, create when IsAdmin; }
+}
+
+/// Whom the desk's `Accepted` acted for, as the platform says: the person the row is made for (`[CreatedFor]`, stamped by
+/// the platform) and the person `Security.AskedById` read there. Only the app's code at the kit's seam makes one.
+public entity AcceptanceSeen {
+  [Required, Immutable] Invitation Invitation;
+  [CreatedFor] Guid? MadeFor;
+  Guid? ActedFor;
+  security { allow read when IsAdmin; }
+}
+
+app.Invitations = new InvitationsSetup { Events = new DeskInvitationEvents() };

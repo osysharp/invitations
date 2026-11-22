@@ -363,20 +363,21 @@ void MailAddressConfirmation(InvitationAddress asked) {
 /// when it is accepted — the invitee did not choose the role, and a newcomer is
 /// nobody yet. So "only an Owner makes an Owner" holds on an invitation exactly as on a direct grant: an Owner's
 /// invitation gives it, an Admin's does not, and neither does one whose sender has lost that standing since.
-/// Guarded by tests/inviter-rules.test.osy.
+/// Guarded by tests/inviter-rules.test.osy. The app's `InvitationEvents.Accepted` is called LAST, inside this call, so what
+/// it acts for the sender too: a row it makes is made for them, and `Security.AskedById` reads them
+/// (`the_accepted_event_acts_for_the_sender`).
 [JudgedFor(invitation.SentBy)]
 void GrantWhatWasSent(Invitation invitation, Principal who) {
   if (invitation.Organization != null) {
     var org = invitation.Organization!;
     Join(org, who, MembershipSource.Invitation);
     if (invitation.Role != null) { GrantIn(org, who, invitation.Role.Value); }
-    return;
-  }
-  if (invitation.Role != null && !RoleGrant.Any(g => g.Member == who && g.Role == invitation.Role.Value)) {
+  } else if (invitation.Role != null && !RoleGrant.Any(g => g.Member == who && g.Role == invitation.Role.Value)) {
     new RoleGrant { Member = who, Role = invitation.Role.Value };
     // The app is told in the acceptance's own write — an invited agent is put on the desk's queues as they arrive.
     App.Setting<RolesSetup>().Events.Granted(who, invitation.Role.Value);
   }
+  App.Setting<InvitationsSetup>().Events.Accepted(invitation, who);
 }
 
 /// May another invitation mail go to `address`? Not past five in the last hour or twenty in the last day — counted over

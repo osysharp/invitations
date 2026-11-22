@@ -26,6 +26,33 @@ public class InvitationsSetup {
   /// What else the app refuses an invitation for, beyond the kit's own checks — derive and override
   /// (`InvitationRules`). By default nothing more is refused.
   public InvitationRules Rules = new InvitationRules();
+  /// What the app does when an invitation is accepted, beyond what it gives — derive and override (`InvitationEvents`).
+  /// By default nothing.
+  public InvitationEvents Events = new InvitationEvents();
+}
+
+/// Told when an invitation is accepted, after what it gives is given — so the app gives what else it carries (a role of
+/// the app's own, a seat at a desk). It runs inside the acceptance's own write, JUDGED FOR THE PERSON WHO SENT the
+/// invitation, as they stand now, exactly as the grant is (SECURITY-INVARIANT(an-invitations-grant-is-its-inviters)): a
+/// write of yours another package's rules refuse for the sender is refused, and nothing of the acceptance lands — the
+/// invitation stays open and the person is told why.
+///
+/// Your code here runs as the SYSTEM, with your app's own denies off: nobody is signed in to it (`Session.CurrentUser` is
+/// null), and your app's rules on your own rows do not bind what it writes. Only another package's rules do, as they bind
+/// app code at any kit's seam (Platform.Tests AppCodeAtAKitActorsSeamRunsAsBeforeTests). So decide ONLY from what the
+/// sender fixed: the invitation's fields nobody changes once it is sent (`Email`, `Role`, `Organization`, `SentBy`), and
+/// rows the platform stamped with whoever made them (`[CreatedBy]`), checked against `SentBy` and asked again of that person
+/// as they stand now. Never decide from a field somebody else may still edit, such as `Note`: whoever can edit the
+/// invitation would then choose what the sender's acceptance gives.
+///
+///     public class DeskInvitations : InvitationEvents {
+///       public override void Accepted(Invitation invitation, Principal person) { SeatAtTheDesk(invitation, person); }
+///     }
+///     app.Invitations = new InvitationsSetup { Events = new DeskInvitations() };
+///
+/// Throw to refuse the acceptance; the sentence reaches the person at the door they used.
+public class InvitationEvents {
+  public virtual void Accepted(Invitation invitation, Principal person) { }
 }
 
 /// The app's own reasons to refuse an invitation, asked by `Invite` after the kit's checks and before anything is saved —
@@ -72,7 +99,11 @@ public class InvitationAccounts {
 /// Throws the sentence to show for something that is not an address, or a person who already holds what it would give.
 /// `anotherAddress`: the newcomer may make their account for another address than `email` — proven by a confirmation
 /// mailed to it before the account is made. Off by default: only the invited address answers.
-public Invitation Invite(string email, role? role = null, Organization? organization = null, string note = "", bool anotherAddress = false) {
+/// `saveNow: false` leaves the invitation unsaved, for an app that saves rows travelling with it in the SAME commit (Admin's
+/// custom roles): nothing is mailed until the caller commits, and a commit that is refused leaves no invitation behind. It
+/// is judged exactly as one saved here; an invitation already waiting is returned as it is.
+public Invitation Invite(string email, role? role = null, Organization? organization = null, string note = "", bool anotherAddress = false,
+                         bool saveNow = true) {
   var address = NormalisedEmail(email);
   if (!LooksLikeEmail(address)) { throw new ValidationException("That does not look like an email address."); }
   // A role is invited to where the app says it may be held (`RoleChoice.HeldIn`).
@@ -97,7 +128,7 @@ public Invitation Invite(string email, role? role = null, Organization? organiza
     ValidFor = setup.ValidFor, RemindAfter = setup.RemindAfter, RemindEvery = setup.RemindEvery,
     AnotherAddressAllowed = anotherAddress,
   };
-  UnitOfWork.Commit();
+  if (saveNow) { UnitOfWork.Commit(); }
   return made;
 }
 
